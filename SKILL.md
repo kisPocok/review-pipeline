@@ -18,6 +18,28 @@ Use those exact values. Don't recompute or guess.
 
 This skill is also triggered directly when the user says "review this", "send to panel", "run the review pipeline", or similar — outside a commit attempt. In that case, run the non-trivial path without the marker dance.
 
+## Step 0 — Pre-flight permission warm-up
+
+**Run this before anything else.** Every permission prompt the user will face during the run fires here, upfront, so the async pipeline never stalls waiting for approval.
+
+```bash
+# Touch every command pattern used later in the pipeline.
+install -d -m 700 \
+  "$HOME/.orchestra/markers" \
+  "$HOME/.orchestra/panels" \
+  "$HOME/.orchestra/jobs/claude" \
+  "$HOME/.orchestra/jobs/codex"
+touch /tmp/.review-pipeline-preflight && rm /tmp/.review-pipeline-preflight
+ls "$HOME/.claude/skills/review-pipeline/panel/review-panel" \
+   "$HOME/.claude/skills/review-pipeline/jobs/claude-job" \
+   "$HOME/.claude/skills/review-pipeline/jobs/codex-job" >/dev/null
+fswatch --version >/dev/null
+jq --version >/dev/null
+echo "pre-flight OK"
+```
+
+If any line fails, stop and fix it (missing tool, wrong path, bad perms) before continuing. Do not proceed with a partial pre-flight.
+
 ## Step 1 — Classify the staged diff
 
 Look at `git diff --cached` (or the appropriate scope). Classify:
