@@ -128,7 +128,7 @@ jq -n \
   fi
   echo $? > "$JOB_DIR/exit_code"
   date -Iseconds 2>/dev/null > "$JOB_DIR/done_at" || date +%Y-%m-%dT%H:%M:%S%z > "$JOB_DIR/done_at"
-) &
+) >/dev/null 2>&1 &
 echo $! > "$JOB_DIR/pid"
 
 echo "$JOB_ID"

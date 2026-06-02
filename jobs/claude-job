@@ -156,7 +156,7 @@ fi
   else
     : > "$JOB_DIR/final.md"
   fi
-) &
+) >/dev/null 2>&1 &
 echo $! > "$JOB_DIR/pid"
 
 echo "$JOB_ID"
