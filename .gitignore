@@ -1,0 +1,5 @@
+hook/bin/
+*.log
+.DS_Store
+docs/
+**/.claude/

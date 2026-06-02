@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# claude-job: launch an async Claude Code job under the user's subscription.
+#
+# Self-contained primitive for the review-pipeline panel and triage steps.
+# Artifacts land in $HOME/.orchestra/jobs/claude/<job-id>/.
+#
+# Usage:
+#   claude-job --tier strongest|strong|standard|light \
+#              --mode  review|research|implement \
+#              --prompt-file <path> --repo-root <path> \
+#              [--name SHORT] [--timeout-min N] \
+#              [--json-schema <path>]
+#
+# Prints the job-id on stdout. Outputs land in $HOME/.orchestra/jobs/claude/<job-id>/:
+#   prompt.txt, events.jsonl, final.md, exit_code, done_at, pid, stderr.log, meta.json
+#
+# Tier matrix:
+#   strongest = opus    + xhigh
+#   strong    = opus    + high
+#   standard  = sonnet  + high
+#   light     = haiku   + medium
+#
+# Mode → tool set + permission mode:
+#   review    = Read,Grep,Glob                       (no Bash, no edit; produces markdown)
+#   research  = Read,Grep,Glob,Bash                  (Bash for git log/diff; no edit)
+#   implement = Read,Edit,Write,Grep,Glob,Bash       (full edits)
+#
+# Auth: strips ANTHROPIC_API_KEY to force subscription auth (consistent with peer's
+# codex-job pattern; subscription is free under the active Claude login).
+
+set -euo pipefail
+
+TIER="standard"
+MODE="review"
+PROMPT_FILE=""
+REPO_ROOT=""
+NAME="task"
+TIMEOUT_MIN=""
+JSON_SCHEMA=""
+EFFORT_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tier)         TIER="$2"; shift 2 ;;
+    --mode)         MODE="$2"; shift 2 ;;
+    --prompt-file)  PROMPT_FILE="$2"; shift 2 ;;
+    --repo-root)    REPO_ROOT="$2"; shift 2 ;;
+    --name)         NAME="$2"; shift 2 ;;
+    --timeout-min)  TIMEOUT_MIN="$2"; shift 2 ;;
+    --json-schema)  JSON_SCHEMA="$2"; shift 2 ;;
+    --effort)       EFFORT_OVERRIDE="$2"; shift 2 ;;
+    -h|--help)      sed -n '2,28p' "$0"; exit 0 ;;
+    --prompt|--prompt-content|-p)
+      echo "claude-job: '$1' is not supported — use --prompt-file <path>. Write the prompt to a file first." >&2
+      exit 2 ;;
+    *) echo "claude-job: unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -f "$PROMPT_FILE" ]] || { echo "claude-job: --prompt-file required" >&2; exit 2; }
+[[ -d "$REPO_ROOT"   ]] || { echo "claude-job: --repo-root required" >&2; exit 2; }
+
+case "$TIER" in
+  strongest) MODEL="opus";   EFFORT="xhigh"  ;;
+  strong)    MODEL="opus";   EFFORT="high"   ;;
+  standard)  MODEL="sonnet"; EFFORT="high"   ;;
+  light)     MODEL="haiku";  EFFORT="medium" ;;
+  *) echo "claude-job: unknown tier: $TIER" >&2; exit 2 ;;
+esac
+
+# --effort overrides the tier's default effort (e.g. `--tier standard --effort xhigh`
+# for Sonnet at xhigh, used by the review-pipeline deduper).
+if [[ -n "$EFFORT_OVERRIDE" ]]; then
+  EFFORT="$EFFORT_OVERRIDE"
+fi
+
+case "$MODE" in
+  review)    DEFAULT_TIMEOUT=10; TOOLS="Read,Grep,Glob" ;;
+  research)  DEFAULT_TIMEOUT=15; TOOLS="Read,Grep,Glob,Bash" ;;
+  implement) DEFAULT_TIMEOUT=30; TOOLS="Read,Edit,Write,Grep,Glob,Bash" ;;
+  *) echo "claude-job: unknown mode: $MODE" >&2; exit 2 ;;
+esac
+[[ -n "$TIMEOUT_MIN" ]] || TIMEOUT_MIN=$DEFAULT_TIMEOUT
+
+NAME=$(echo "$NAME" | tr -c '[:alnum:]-_' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')
+
+JOB_ID="claude-${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
+JOB_DIR="$HOME/.orchestra/jobs/claude/$JOB_ID"
+mkdir -p "$JOB_DIR"
+cp "$PROMPT_FILE" "$JOB_DIR/prompt.txt"
+
+jq -n \
+  --arg id "$JOB_ID" \
+  --arg tier "$TIER" \
+  --arg mode "$MODE" \
+  --arg model "$MODEL" \
+  --arg effort "$EFFORT" \
+  --arg tools "$TOOLS" \
+  --argjson timeout "$TIMEOUT_MIN" \
+  --arg started "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" \
+  --arg repo "$REPO_ROOT" \
+  --arg schema "$JSON_SCHEMA" \
+  '{id:$id,tier:$tier,mode:$mode,model:$model,effort:$effort,tools:$tools,timeout_min:$timeout,started_at:$started,repo_root:$repo,json_schema:$schema}' \
+  > "$JOB_DIR/meta.json"
+
+# Build the optional --json-schema arg only if provided.
+SCHEMA_ARGS=()
+if [[ -n "$JSON_SCHEMA" ]]; then
+  [[ -f "$JSON_SCHEMA" ]] || { echo "claude-job: --json-schema file not found: $JSON_SCHEMA" >&2; exit 2; }
+  SCHEMA_ARGS=(--json-schema "$(cat "$JSON_SCHEMA")")
+fi
+
+(
+  set +e
+  # Force subscription auth by stripping any API key in the environment.
+  unset ANTHROPIC_API_KEY
+
+  TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+  CLAUDE_CMD=(
+    claude -p
+    --model "$MODEL"
+    --effort "$EFFORT"
+    --add-dir "$REPO_ROOT"
+    --output-format stream-json
+    --verbose
+    --permission-mode bypassPermissions
+    --tools "$TOOLS"
+    --no-session-persistence
+    "${SCHEMA_ARGS[@]}"
+  )
+
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "${TIMEOUT_MIN}m" \
+      "${CLAUDE_CMD[@]}" \
+      < "$JOB_DIR/prompt.txt" \
+      > "$JOB_DIR/events.jsonl" \
+      2> "$JOB_DIR/stderr.log"
+  else
+    "${CLAUDE_CMD[@]}" \
+      < "$JOB_DIR/prompt.txt" \
+      > "$JOB_DIR/events.jsonl" \
+      2> "$JOB_DIR/stderr.log"
+  fi
+  rc=$?
+  echo "$rc" > "$JOB_DIR/exit_code"
+  date -Iseconds 2>/dev/null > "$JOB_DIR/done_at" || date +%Y-%m-%dT%H:%M:%S%z > "$JOB_DIR/done_at"
+
+  # Extract final assistant text into final.md.
+  if [[ -s "$JOB_DIR/events.jsonl" ]]; then
+    jq -r '
+      select(.type=="assistant")
+      | .message.content[]?
+      | select(.type=="text")
+      | .text
+    ' "$JOB_DIR/events.jsonl" > "$JOB_DIR/final.md" 2> "$JOB_DIR/extract.err" || true
+  else
+    : > "$JOB_DIR/final.md"
+  fi
+) &
+echo $! > "$JOB_DIR/pid"
+
+echo "$JOB_ID"

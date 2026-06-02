@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# codex-job: launch an async Codex exec job under the standard Codex config.
+#
+# Self-contained primitive for the review-pipeline panel. Artifacts land in
+# $HOME/.orchestra/jobs/codex/<job-id>/.
+#
+# Usage:
+#   codex-job --tier strongest|strong|standard|light|codex-tuned \
+#             --mode  research|implement|review \
+#             --prompt-file <path> --repo-root <path> \
+#             [--name SHORT] [--timeout-min N] [--sandbox read-only|workspace-write]
+#
+# Prints the job-id on stdout. Outputs land in $HOME/.orchestra/jobs/codex/<job-id>/:
+#   prompt.txt, events.jsonl, final.md, exit_code, done_at, pid, stderr.log, meta.json
+#
+# Tier matrix:
+#   strongest    = gpt-5.5       effort=high     (review default — local codex caps at high)
+#   strong       = gpt-5.5       effort=high
+#   standard     = gpt-5.5       effort=medium
+#   light        = gpt-5.4-mini  effort=low
+#   codex-tuned  = gpt-5.3-codex effort=medium
+#
+# Auth: uses standard ~/.codex/ (or $CODEX_HOME if pre-set in env). API-key
+# billing on this machine — no ChatGPT subscription isolation.
+
+set -euo pipefail
+
+TIER="standard"
+MODE="implement"
+PROMPT_FILE=""
+REPO_ROOT=""
+NAME="task"
+TIMEOUT_MIN=""
+SANDBOX_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tier)         TIER="$2"; shift 2 ;;
+    --mode)         MODE="$2"; shift 2 ;;
+    --prompt-file)  PROMPT_FILE="$2"; shift 2 ;;
+    --repo-root)    REPO_ROOT="$2"; shift 2 ;;
+    --name)         NAME="$2"; shift 2 ;;
+    --timeout-min)  TIMEOUT_MIN="$2"; shift 2 ;;
+    --sandbox)      SANDBOX_OVERRIDE="$2"; shift 2 ;;
+    -h|--help)      sed -n '2,24p' "$0"; exit 0 ;;
+    --prompt|--prompt-content|-p)
+      echo "codex-job: '$1' is not supported — use --prompt-file <path>. Write the prompt to a file first." >&2
+      exit 2 ;;
+    *) echo "codex-job: unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -f "$PROMPT_FILE" ]] || { echo "codex-job: --prompt-file required" >&2; exit 2; }
+[[ -d "$REPO_ROOT"   ]] || { echo "codex-job: --repo-root required" >&2; exit 2; }
+
+case "$TIER" in
+  strongest)   MODEL="gpt-5.5";       EFFORT="high"   ;;
+  strong)      MODEL="gpt-5.5";       EFFORT="high"   ;;
+  standard)    MODEL="gpt-5.5";       EFFORT="medium" ;;
+  light)       MODEL="gpt-5.4-mini";  EFFORT="low"    ;;
+  codex-tuned) MODEL="gpt-5.3-codex"; EFFORT="medium" ;;
+  *) echo "codex-job: unknown tier: $TIER" >&2; exit 2 ;;
+esac
+
+case "$MODE" in
+  research)  DEFAULT_TIMEOUT=15; SANDBOX="read-only"       ;;
+  review)    DEFAULT_TIMEOUT=10; SANDBOX="read-only"       ;;
+  implement) DEFAULT_TIMEOUT=60; SANDBOX="workspace-write" ;;
+  *) echo "codex-job: unknown mode: $MODE" >&2; exit 2 ;;
+esac
+[[ -n "$TIMEOUT_MIN" ]] || TIMEOUT_MIN=$DEFAULT_TIMEOUT
+[[ -n "$SANDBOX_OVERRIDE" ]] && SANDBOX="$SANDBOX_OVERRIDE"
+
+NAME=$(echo "$NAME" | tr -c '[:alnum:]-_' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')
+
+JOB_ID="codex-${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
+JOB_DIR="$HOME/.orchestra/jobs/codex/$JOB_ID"
+mkdir -p "$JOB_DIR"
+cp "$PROMPT_FILE" "$JOB_DIR/prompt.txt"
+
+CODEX_HOME_RESOLVED="${CODEX_HOME:-$HOME/.codex}"
+
+jq -n \
+  --arg id "$JOB_ID" \
+  --arg tier "$TIER" \
+  --arg mode "$MODE" \
+  --arg model "$MODEL" \
+  --arg effort "$EFFORT" \
+  --arg sandbox "$SANDBOX" \
+  --argjson timeout "$TIMEOUT_MIN" \
+  --arg started "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" \
+  --arg repo "$REPO_ROOT" \
+  --arg home "$CODEX_HOME_RESOLVED" \
+  '{id:$id,tier:$tier,mode:$mode,model:$model,effort:$effort,sandbox:$sandbox,timeout_min:$timeout,started_at:$started,repo_root:$repo,codex_home:$home}' \
+  > "$JOB_DIR/meta.json"
+
+(
+  set +e
+  # gtimeout on macOS (from coreutils); fall back to plain `timeout` on Linux.
+  TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "${TIMEOUT_MIN}m" \
+      codex exec \
+        --model "$MODEL" \
+        -c "model_reasoning_effort=\"$EFFORT\"" \
+        --sandbox "$SANDBOX" \
+        --full-auto \
+        --skip-git-repo-check \
+        --cd "$REPO_ROOT" \
+        --json \
+        --output-last-message "$JOB_DIR/final.md" \
+        - < "$JOB_DIR/prompt.txt" \
+        > "$JOB_DIR/events.jsonl" \
+        2> "$JOB_DIR/stderr.log"
+  else
+    codex exec \
+      --model "$MODEL" \
+      -c "model_reasoning_effort=\"$EFFORT\"" \
+      --sandbox "$SANDBOX" \
+      --full-auto \
+      --skip-git-repo-check \
+      --cd "$REPO_ROOT" \
+      --json \
+      --output-last-message "$JOB_DIR/final.md" \
+      - < "$JOB_DIR/prompt.txt" \
+      > "$JOB_DIR/events.jsonl" \
+      2> "$JOB_DIR/stderr.log"
+  fi
+  echo $? > "$JOB_DIR/exit_code"
+  date -Iseconds 2>/dev/null > "$JOB_DIR/done_at" || date +%Y-%m-%dT%H:%M:%S%z > "$JOB_DIR/done_at"
+) &
+echo $! > "$JOB_DIR/pid"
+
+echo "$JOB_ID"

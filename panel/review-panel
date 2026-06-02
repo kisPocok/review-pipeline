@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# review-panel: fire all 6 review-pipeline lenses in parallel against a repo.
+#
+# Usage:
+#   review-panel --repo-root <path> \
+#                [--scope staged|branch:<base>] \
+#                [--packet <path-to-shared-context-md>] \
+#                [--name SHORT]
+#
+# Captures the diff once, generates 6 lens-specific prompts (shared review packet
+# + per-lens body from lenses/<name>.md), fires 3 codex-job + 3 claude-job in
+# parallel, and writes a manifest at $HOME/.orchestra/panels/<panel-id>/manifest.json.
+#
+# Prints the panel-id on stdout. Poll the manifest by checking each job's
+# exit_code file under ~/.orchestra/jobs/{codex,claude}/<job-id>/.
+
+set -euo pipefail
+
+REPO_ROOT=""
+SCOPE="staged"
+PACKET=""
+NAME="panel"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo-root)   REPO_ROOT="$2"; shift 2 ;;
+    --scope)       SCOPE="$2"; shift 2 ;;
+    --packet)      PACKET="$2"; shift 2 ;;
+    --name)        NAME="$2"; shift 2 ;;
+    -h|--help)     sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "review-panel: unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -d "$REPO_ROOT" ]] || { echo "review-panel: --repo-root must be a directory" >&2; exit 2; }
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SKILL_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+LENS_DIR="$SKILL_ROOT/lenses"
+JOBS_DIR="$SKILL_ROOT/jobs"
+CODEX_JOB="$JOBS_DIR/codex-job"
+CLAUDE_JOB="$JOBS_DIR/claude-job"
+
+[[ -d "$LENS_DIR"     ]] || { echo "review-panel: lenses dir missing at $LENS_DIR" >&2; exit 2; }
+[[ -x "$CODEX_JOB"    ]] || { echo "review-panel: codex-job missing at $CODEX_JOB" >&2; exit 2; }
+[[ -x "$CLAUDE_JOB"   ]] || { echo "review-panel: claude-job missing at $CLAUDE_JOB" >&2; exit 2; }
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lenses.sh"
+
+# Capture the diff once for all lenses.
+case "$SCOPE" in
+  staged)
+    DIFF=$(git -C "$REPO_ROOT" diff --cached)
+    DIFF_STAT=$(git -C "$REPO_ROOT" diff --stat --cached)
+    SCOPE_LABEL="staged (uncommitted)"
+    ;;
+  branch:*)
+    BASE="${SCOPE#branch:}"
+    DIFF=$(git -C "$REPO_ROOT" diff "${BASE}...HEAD")
+    DIFF_STAT=$(git -C "$REPO_ROOT" diff --stat "${BASE}...HEAD")
+    SCOPE_LABEL="branch vs ${BASE}"
+    ;;
+  *)
+    echo "review-panel: unknown scope: $SCOPE (expected staged or branch:<base>)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$DIFF" ]]; then
+  echo "review-panel: empty diff for scope=$SCOPE — nothing to review." >&2
+  echo "" >&2
+  echo "What to do:" >&2
+  echo "  1. Stage your files:  git -C $REPO_ROOT add <files>" >&2
+  echo "  2. Verify staging:    git -C $REPO_ROOT diff --cached --stat" >&2
+  echo "  3. Refire the panel." >&2
+  echo "" >&2
+  echo "Common cause: 'git add && git commit' chained in one call." >&2
+  echo "The PreToolUse hook blocks the entire command — git add never runs." >&2
+  echo "Always run git add and git commit as separate Bash tool calls." >&2
+  exit 2
+fi
+
+GIT_STATUS=$(git -C "$REPO_ROOT" status --short)
+
+NAME=$(echo "$NAME" | tr -c '[:alnum:]-_' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')
+PANEL_ID="${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
+PANEL_DIR="$HOME/.orchestra/panels/$PANEL_ID"
+PROMPT_DIR="$PANEL_DIR/prompts"
+mkdir -p "$PROMPT_DIR"
+
+# Persist the shared context block once so each lens prompt can include it.
+SHARED_PACKET="$PANEL_DIR/packet.md"
+if [[ -n "$PACKET" && -f "$PACKET" ]]; then
+  cp "$PACKET" "$SHARED_PACKET"
+else
+  cat > "$SHARED_PACKET" <<EOF
+## Context
+
+_No reviewer packet was supplied. The lens has only the diff to work from._
+
+EOF
+fi
+
+# Compose the shared review-packet header that prepends every lens prompt.
+SHARED_HEADER="$PANEL_DIR/header.md"
+{
+  cat "$SHARED_PACKET"
+  echo
+  echo "## Scope"
+  echo
+  echo "$SCOPE_LABEL"
+  echo
+  echo "## Review packet"
+  echo
+  echo "\`git status --short\` output:"
+  echo
+  echo '```'
+  printf '%s\n' "$GIT_STATUS"
+  echo '```'
+  echo
+  echo "\`git diff --stat\` output:"
+  echo
+  echo '```'
+  printf '%s\n' "$DIFF_STAT"
+  echo '```'
+  echo
+  echo "Full diff:"
+  echo
+  echo '```diff'
+  printf '%s\n' "$DIFF"
+  echo '```'
+  echo
+} > "$SHARED_HEADER"
+
+# Render each lens prompt and fire the corresponding job.
+declare -a ENTRIES=()
+for entry in "${LENSES[@]}"; do
+  IFS='|' read -r NAME_L RUNNER TIER TEMPLATE <<<"$entry"
+  TEMPLATE_PATH="$LENS_DIR/$TEMPLATE"
+  [[ -f "$TEMPLATE_PATH" ]] || { echo "review-panel: lens template missing: $TEMPLATE_PATH" >&2; exit 2; }
+
+  PROMPT="$PROMPT_DIR/${NAME_L}.md"
+  {
+    cat "$SHARED_HEADER"
+    echo
+    echo "---"
+    echo
+    cat "$TEMPLATE_PATH"
+  } > "$PROMPT"
+
+  case "$RUNNER" in
+    codex)  JOB_BIN="$CODEX_JOB"  ;;
+    claude) JOB_BIN="$CLAUDE_JOB" ;;
+    *) echo "review-panel: unknown runner '$RUNNER' for lens $NAME_L" >&2; exit 2 ;;
+  esac
+
+  JOB_ID=$("$JOB_BIN" \
+    --tier "$TIER" \
+    --mode review \
+    --name "${PANEL_ID}-${NAME_L}" \
+    --repo-root "$REPO_ROOT" \
+    --prompt-file "$PROMPT")
+
+  ENTRIES+=("\"${NAME_L}\": {\"runner\": \"${RUNNER}\", \"tier\": \"${TIER}\", \"job_id\": \"${JOB_ID}\"}")
+done
+
+# Assemble manifest.json.
+JOIN=$(IFS=','; echo "${ENTRIES[*]}")
+cat > "$PANEL_DIR/manifest.json" <<EOF
+{
+  "panel_id": "$PANEL_ID",
+  "scope": "$SCOPE",
+  "scope_label": "$SCOPE_LABEL",
+  "repo_root": "$REPO_ROOT",
+  "started_at": "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)",
+  "lenses": { $JOIN }
+}
+EOF
+
+echo "$PANEL_ID"
