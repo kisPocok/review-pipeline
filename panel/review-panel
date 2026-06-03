@@ -69,8 +69,6 @@ case "$SCOPE" in
     ;;
   tree:*)
     BASE_TREE="${SCOPE#tree:}"
-    # Diff a frozen tree-hash against the current staged tree.
-    # Used by round 2+ of a review cycle to scope review to the fix delta.
     CURRENT_TREE=$(git -C "$REPO_ROOT" write-tree)
     DIFF=$(git -C "$REPO_ROOT" diff "${BASE_TREE}" "${CURRENT_TREE}")
     DIFF_STAT=$(git -C "$REPO_ROOT" diff --stat "${BASE_TREE}" "${CURRENT_TREE}")
