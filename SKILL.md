@@ -242,12 +242,14 @@ The pre-fix marker (if any) is irrelevant — the tree has changed. Round counte
 When you hit MAX_ROUNDS, the user needs to choose: ship, defer, or explicitly override the cap. Give them the data to decide. Build a per-round severity-and-outcome table by walking each panel-id in your cycle state:
 
 ```bash
+ROUND=0
 for panel_id in <your-list-of-panel-ids>; do
+  ROUND=$((ROUND + 1))
   fpath=~/.orchestra/panels/$panel_id/dispositions.json
   if [ ! -f "$fpath" ]; then continue; fi
-  jq -r --arg pid "$panel_id" '
-    [.dispositions[] | .outcome] | group_by(.) | map({(.[0]): length}) | add
-    | . + {panel_id: $pid, round: 1}
+  jq -r --arg pid "$panel_id" --argjson r "$ROUND" '
+    ([.dispositions[] | .outcome] | group_by(.) | map({(.[0]): length}) | add // {})
+    + {panel_id: $pid, round: $r}
   ' "$fpath"
 done
 ```
@@ -273,7 +275,7 @@ Then ask the user with `AskUserQuestion`:
 1. **Ship with current fixes.** Round-3 fixes are applied; write the marker, retry the commit. The 14 LOWs aren't refired against. (Recommended when remaining is L-heavy.)
 2. **Acknowledge and ship.** Update round-3 dispositions to `acknowledged` for the items you don't want to fix, then write the marker.
 3. **Defer to a follow-up PR.** Stage your current fixes, commit; open a follow-up PR for the remaining findings.
-4. **Continue past MAX_ROUNDS.** Only choose this if a HIGH/CRITICAL is in the remaining list. If the table shows zero HIGH+CRITICAL, this option is almost always wrong.
+4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.8), capture the post-fix tree (per 2B.9), then refire one more round with `--scope tree:$POST_FIX_TREE` (per 2B.2). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
 
 Include the override list (your `deduper_override: true` dispositions across all rounds) in your response so the user can audit.
 
