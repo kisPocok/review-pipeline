@@ -147,7 +147,7 @@ Behavior:
 
 ### 2B.6 — Decide a disposition for every finding
 
-For each finding in `findings.json`, decide exactly one outcome:
+For each finding in the deduper's findings JSON (the path is `$FINDINGS_JSON` from 2B.5), decide exactly one outcome:
 
 | Outcome | When to use |
 |---|---|
@@ -172,7 +172,7 @@ Build and write `~/.orchestra/panels/$PANEL_ID/dispositions.json` matching `tria
 {
   "panel_id": "<panel-id>",
   "round": <1-indexed>,
-  "findings_path": "<absolute path to findings.json from run-dedupe>",
+  "findings_path": "<value of $FINDINGS_JSON from 2B.5 — the deduper's final.md path>",
   "dispositions": [
     {"finding_id": "F001", "outcome": "fixed", "reason": "applied input length cap in <file>:<line>"},
     {"finding_id": "F002", "outcome": "acknowledged", "reason": "PKCE deferred to callback PR; tracked in docs/sso/SECURITY-NOTES.md"},
@@ -203,7 +203,7 @@ Count outcomes from the disposition file you just wrote:
 
 **Convergence gate (LOW-only):**
 
-- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` in `findings.json` (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
+- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` in the findings JSON (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
   1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
   2. **Fix and ship.** Apply the LOW fixes this round, but write the marker after this round without refiring another panel. No round N+1.
   3. **Fix and continue.** Apply the LOWs and refire (standard loop). Only choose this if there's a concrete reason to expect new HIGHs hiding behind the LOW fixes.
