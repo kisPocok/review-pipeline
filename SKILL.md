@@ -300,7 +300,7 @@ Include the override list (your `deduper_override: true` dispositions across all
 
 - ❌ **Generic packet.** "Just review this diff" → generic results. Fill in every section of the packet template.
 - ❌ **Fire and forget.** Always come back for the panel result before committing.
-- ❌ **Ignoring low/medium findings to save time.** If they're valid (after your FP verification), fix them.
+- ❌ **Ignoring low/medium findings without recording a disposition.** Every valid finding gets an outcome in `dispositions.json` — `fixed`, `acknowledged`, or `false_positive`. Silently dropping a finding (no fix, no entry) is the anti-pattern. `acknowledged` with a defensible reason is a legitimate outcome; "I'm just going to skip this" is not.
 - ❌ **Blindly applying the deduper's FP labels.** Verify each rejection's reason has code citations.
 - ❌ **Skipping FP verification because "the panel seems clean."** If the deduper reports `rejected_count > 0`, you read every rejection.
 - ❌ **Treating a non-zero `exit_code` as "no findings — looks clean."** Inspect `stderr.log` first.
@@ -311,7 +311,11 @@ Include the override list (your `deduper_override: true` dispositions across all
 - ❌ **Bypassing the hook by wrapping the commit in a shell form the parser doesn't reach** (heredoc-to-bash, deeply nested subshells, `eval`). If you find yourself reaching for a wrapper to dodge the block, that's the signal to actually run the panel.
 - ❌ **Skipping classification in autonomous mode.** Trivial diffs still get the bypass; the autonomous distinction only changes whether you ASK the user about non-trivial panels — it doesn't promote trivial diffs into reviewable ones.
 - ❌ **Letting fixer scope creep happen.** Each fix is scoped to its finding. Adjacent "improvements" are out of scope and create new findings the next round will catch, looping forever.
-- ❌ **Hiding overrides from the user.** If you promoted any false_positive back to valid, the user must see that in your final response.
+- ❌ **Hiding overrides from the user.** Every disposition entry with `deduper_override: true` must be surfaced in your final response with its reason — so the user can audit cases where you disagreed with the deduper's verdict.
 - ❌ **Cheating MAX_ROUNDS.** Three rounds is the cap. If you can't converge, surface to the user — don't keep firing panels.
 - ❌ **Chaining `git add` and `git commit` in the same Bash call.** The hook fires as `PreToolUse` and blocks the entire command — `git add` never runs either. Always issue them as separate Bash tool calls: stage first, confirm with `git diff --cached --stat`, then commit.
 - ❌ **Using `ScheduleWakeup` to wait for panel or deduper jobs.** These are background tasks — the harness notifies you automatically when they complete. `ScheduleWakeup` is for `/loop dynamic` mode only. Never fire it inside a review-pipeline run.
+- ❌ **Round 2+ with `--scope staged`.** Defeats the frozen baseline. Round 1 reviews the full diff; every subsequent round MUST use `--scope tree:<previous-post-fix-tree>` so the review surface shrinks each round instead of growing. The growing-surface failure mode is what caused the NA-1058 10-round loop.
+- ❌ **Refiring at MAX_ROUNDS without surfacing the severity table.** The user cannot make an informed continue/stop decision without per-round H/M/L counts and fixed/ack/fp breakdown. Build the table first, then ask.
+- ❌ **Using `acknowledged` as a synonym for "I don't feel like fixing this".** The `reason` must be defensible to a reviewer. Out-of-scope, deferred to a tracked follow-up, or spec-mandated are valid. "Low impact" without justification is not.
+- ❌ **Overriding the deduper without setting `deduper_override: true`.** If you re-classified a deduper-marked FP as valid (or vice versa), the disposition entry MUST flag the override for audit. This is how the user spots cases where the deduper and the conductor systematically disagree.
