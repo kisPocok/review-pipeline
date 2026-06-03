@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# preflight: warm up every permission / dependency the review pipeline needs
+# before the agent fires the panel. Bundling these into one script means a
+# single allowlist entry covers the whole pre-flight, and no permission prompt
+# fires mid-run to stall the async pipeline.
+#
+# Usage:
+#   preflight
+#
+# Exits 0 with "pre-flight OK" on stdout when everything is in place.
+# Exits non-zero with the failure on stderr otherwise.
+
+set -euo pipefail
+
+# 1. Required runtime dirs.
+install -d -m 700 \
+  "$HOME/.orchestra/markers" \
+  "$HOME/.orchestra/panels" \
+  "$HOME/.orchestra/jobs/claude" \
+  "$HOME/.orchestra/jobs/codex"
+
+# 2. Smoke-test /tmp writability (the packet file lives there).
+TMPPROBE=$(mktemp /tmp/review-pipeline-preflight.XXXXXX)
+echo "ok" > "$TMPPROBE"
+rm -f "$TMPPROBE"
+
+# 3. Required skill scripts.
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+for f in \
+  "$SKILL_DIR/panel/review-panel" \
+  "$SKILL_DIR/panel/wait-panel" \
+  "$SKILL_DIR/panel/run-dedupe" \
+  "$SKILL_DIR/panel/write-marker" \
+  "$SKILL_DIR/jobs/claude-job" \
+  "$SKILL_DIR/jobs/codex-job"
+do
+  [[ -x "$f" ]] || { echo "preflight: missing or non-executable: $f" >&2; exit 1; }
+done
+
+# 4. Required external tools.
+command -v jq      >/dev/null || { echo "preflight: jq not on PATH" >&2; exit 1; }
+command -v git     >/dev/null || { echo "preflight: git not on PATH" >&2; exit 1; }
+command -v claude  >/dev/null || { echo "preflight: claude CLI not on PATH" >&2; exit 1; }
+command -v codex   >/dev/null || { echo "preflight: codex CLI not on PATH" >&2; exit 1; }
+
+echo "pre-flight OK"

@@ -144,9 +144,10 @@ func blockMessage(cwd string, globals []string, hash, extra string) string {
 	if extra != "" {
 		fmt.Fprintf(&b, "  note:          %s\n", extra)
 	}
-	b.WriteString("\nSTOP. Invoke the `review-pipeline` skill BEFORE this commit.\n\n")
-	b.WriteString("  - Interactive mode  → ask the user via AskUserQuestion whether to run the\n")
-	b.WriteString("                        review panel first; honor the answer.\n")
+	b.WriteString("\n❌ STOP. Invoke the `review-pipeline` skill BEFORE this commit.\n\n")
+	b.WriteString("  - Trivial diff (no semantic logic change, multi-line cosmetic, doc-only edit, rename, version bump, etc.) → write the marker and retry the commit.\n")
+	// b.WriteString("  - Interactive mode  → ask the user via AskUserQuestion whether to run the\n")
+	// b.WriteString("                        review panel first; honor the answer.\n")
 	b.WriteString("  - Autonomous mode (multi-file implementation, or /goal invocation) →\n")
 	b.WriteString("                        run the review panel automatically without asking.\n\n")
 	b.WriteString("After processing the review and applying valid fixes (or after the user opts\n")

@@ -7,6 +7,18 @@ description: How to respond when the review-pipeline pre-commit hook blocks a `g
 
 A multi-lens commit-time review. The Go hook at `~/.claude/skills/review-pipeline/hook/bin/pre-commit-check` is registered as a `PreToolUse` on `Bash` and **blocks every real `git commit`** until a marker file exists at `~/.orchestra/markers/<git-write-tree>`. Your job when blocked: classify the diff, run the review pipeline if non-trivial, fix what's valid, write the marker for the final post-fix tree, retry the commit.
 
+## ⛔ FIRST ACTION — Pre-flight permission warm-up (DO NOT SKIP)
+
+**STOP. This is the first thing you do when this skill is invoked.** Before reading the rest of this file, before looking at `git diff`, before classifying anything — run the block below. It surfaces every permission prompt the pipeline will trigger, upfront, in one shot. **Skip this and the async pipeline stalls mid-run waiting for approval the agent firing it cannot give**, silently — you will not get a useful error, just a hang.
+
+This is not optional setup. This is not "if you have time". This is the first action. Run the command, confirm it prints `pre-flight OK`, then continue to "How this skill is triggered".
+
+```bash
+~/.claude/skills/review-pipeline/panel/preflight
+```
+
+The script creates the runtime dirs, smoke-tests `/tmp` writability, verifies every pipeline script is present and executable, and confirms `jq`, `git`, `claude`, `codex` are on `PATH`. If it exits non-zero, stop and fix the failure it printed before continuing. Do not proceed with a partial pre-flight.
+
 ## How this skill is triggered
 
 The hook decides; you don't. When you run `git commit -m "..."` and the hook prints stderr containing **`STOP. Invoke the \`review-pipeline\` skill BEFORE this commit.`**, follow this playbook. The hook also prints:
@@ -17,28 +29,6 @@ The hook decides; you don't. When you run `git commit -m "..."` and the hook pri
 Use those exact values. Don't recompute or guess.
 
 This skill is also triggered directly when the user says "review this", "send to panel", "run the review pipeline", or similar — outside a commit attempt. In that case, run the non-trivial path without the marker dance.
-
-## Step 0 — Pre-flight permission warm-up
-
-**Run this before anything else.** Every permission prompt the user will face during the run fires here, upfront, so the async pipeline never stalls waiting for approval.
-
-```bash
-# Touch every command pattern used later in the pipeline.
-install -d -m 700 \
-  "$HOME/.orchestra/markers" \
-  "$HOME/.orchestra/panels" \
-  "$HOME/.orchestra/jobs/claude" \
-  "$HOME/.orchestra/jobs/codex"
-touch /tmp/.review-pipeline-preflight && rm /tmp/.review-pipeline-preflight
-ls "$HOME/.claude/skills/review-pipeline/panel/review-panel" \
-   "$HOME/.claude/skills/review-pipeline/jobs/claude-job" \
-   "$HOME/.claude/skills/review-pipeline/jobs/codex-job" >/dev/null
-fswatch --version >/dev/null
-jq --version >/dev/null
-echo "pre-flight OK"
-```
-
-If any line fails, stop and fix it (missing tool, wrong path, bad perms) before continuing. Do not proceed with a partial pre-flight.
 
 ## Step 1 — Classify the staged diff
 
@@ -52,13 +42,11 @@ Look at `git diff --cached` (or the appropriate scope). Classify:
 Briefly note to the user (one line) that you skipped the panel because the diff was trivial, so the skip is auditable. Then write the marker:
 
 ```bash
-MDIR="$HOME/.orchestra/markers"
-install -d -m 700 "$MDIR"
-touch "$MDIR/$(git [globals as printed by the hook] -C <effective_cwd> write-tree)"
+~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals as printed by the hook]
 git commit ...   # retry; hook consumes marker, commit proceeds
 ```
 
-Use the exact `effective cwd` and `git globals` the hook printed. Don't guess.
+`write-marker` runs `git [globals] -C <cwd> write-tree`, ensures `~/.orchestra/markers/` exists, touches the marker file, and prints `<tree-hash> <marker-path>` on stdout. Use the exact `effective cwd` and `git globals` the hook printed.
 
 ## Step 2B — Non-trivial path: full panel + dedupe + fix loop
 
@@ -108,100 +96,34 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
 
 `review-panel` fires all 6 lenses in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` and lists which job-id each lens went to.
 
-### 2B.3 — Wait for the panel
+### 2B.3 — Wait for the panel and validate
 
-**Require `fswatch`** (`brew install fswatch` if missing). Use event-driven waiting — never a sleep loop.
+One command polls for all 6 lens `exit_code` files and validates each `final.md`:
 
 ```bash
-PANEL_DIR=~/.orchestra/panels/$PANEL_ID
-
-# Helper: count lens jobs that have written exit_code.
-count_done() {
-  jq -r '.lenses | to_entries[] | .value.runner + "/" + .value.job_id' "$PANEL_DIR/manifest.json" \
-    | while read -r jpath; do
-        [ -f "$HOME/.orchestra/jobs/$jpath/exit_code" ] && echo x
-      done \
-    | wc -l
-}
-
-# Build the list of job dirs for this panel (scoped to avoid watching other panels).
-# Note: mapfile requires bash 4+; this while-read form works on macOS bash 3.2.
-JOB_DIRS=()
-while IFS= read -r dir; do
-  JOB_DIRS+=("$dir")
-done < <(
-  jq -r --arg h "$HOME" \
-    '.lenses | to_entries[] | $h + "/.orchestra/jobs/" + .value.runner + "/" + .value.job_id' \
-    "$PANEL_DIR/manifest.json"
-)
-
-# Pre-check: jobs may finish between panel launch and watch start.
-DONE=$(count_done)
-if [ "$DONE" -lt 6 ]; then
-  # Filter order matters: --exclude first, then --include overrides it.
-  # No --event filter: fswatch may emit Renamed (not Created) for atomically-written files.
-  fswatch -r --exclude '.*' --include '/exit_code$' "${JOB_DIRS[@]}" \
-    | while read -r _event; do
-        DONE=$(count_done)
-        [ "$DONE" -ge 6 ] && exit 0
-      done
-fi
+~/.claude/skills/review-pipeline/panel/wait-panel "$PANEL_ID"
 ```
 
-**Why pre-check + re-count on each event?** Pre-check handles the race where all jobs finish before `fswatch` starts. Re-counting on each event (rather than tracking N events) handles the race where some jobs finish after pre-check but before the watch is established.
+Behavior:
+- Polls every 2s, logging only on state change (so stderr stays ~7 lines total regardless of total wait time).
+- Validates: `exit_code` is `0`, `final.md` non-empty, and contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel.
+- Exits `0` only if all 6 pass. Non-zero exit → surface the summary table to the user; do **not** proceed to dedupe.
 
 **If you have parallel work to do** (drafting the PR description, planning the next step), start that work after firing the panel. You'll be notified automatically when the background task completes — do NOT fire `ScheduleWakeup` for this.
 
-### 2B.4 — Validate each lens's `final.md`
-
-For each lens job, check:
-- `exit_code` is `0`. Non-zero → treat as failure: surface to the user, do NOT write the marker.
-- `final.md` exists and size > 0.
-- `final.md` contains either a severity header (`## Critical`, `## High`, `## Medium`, `## Low`) OR the literal "No findings." sentinel.
-
-Any lens that fails validation: STOP. Surface the failure to the user with `stderr.log` tail. Never proceed to dedupe with an incomplete panel.
-
 ### 2B.5 — Run the deduper
 
-Concatenate the 6 `final.md` files with clear lens-name headers between them, then fire one Sonnet xhigh job with structured JSON output:
+One command builds the dedupe input from the 6 `final.md`s, fires a Sonnet xhigh job with the JSON schema, waits for completion, and prints the path to the findings JSON:
 
 ```bash
-# Build the deduper input file.
-INPUT=$(mktemp /tmp/dedupe-input.XXXXXX.md)
-[ -f "$INPUT" ] || { echo "mktemp failed — cannot create deduper input file"; exit 1; }
-for lens in security architecture quality security_xcheck frontend test_effectiveness; do
-  job_id=$(jq -r ".lenses.$lens.job_id" "$PANEL_DIR/manifest.json")
-  runner=$(jq -r ".lenses.$lens.runner" "$PANEL_DIR/manifest.json")
-  echo "## Lens report: $lens" >> "$INPUT"
-  echo >> "$INPUT"
-  cat "$HOME/.orchestra/jobs/$runner/$job_id/final.md" >> "$INPUT"
-  echo >> "$INPUT"
-done
-
-# Compose the deduper prompt: instructions + input.
-PROMPT=$(mktemp /tmp/dedupe-prompt.XXXXXX.md)
-[ -f "$PROMPT" ] || { echo "mktemp failed — cannot create deduper prompt file"; exit 1; }
-cat ~/.claude/skills/review-pipeline/triage/deduper-prompt.md "$INPUT" > "$PROMPT"
-
-# Fire deduper as a claude-job (research mode — no edits).
-# --tier standard maps to Sonnet; --effort xhigh overrides the default high → Sonnet xhigh.
-DEDUPE_JOB=$(~/.claude/skills/review-pipeline/jobs/claude-job \
-  --tier standard \
-  --effort xhigh \
-  --mode research \
-  --name "${PANEL_ID}-dedupe" \
-  --repo-root <effective_cwd> \
-  --prompt-file "$PROMPT" \
-  --json-schema ~/.claude/skills/review-pipeline/triage/deduper-schema.json)
-
-# Wait for it.
-until [ -f "$HOME/.orchestra/jobs/claude/$DEDUPE_JOB/exit_code" ]; do sleep 10; done
-
-# Read findings.json from the deduper's final.md (it should be pure JSON).
-FINDINGS_JSON="$HOME/.orchestra/jobs/claude/$DEDUPE_JOB/final.md"
+FINDINGS_JSON=$(~/.claude/skills/review-pipeline/panel/run-dedupe "$PANEL_ID")
 ```
 
-> **mktemp guard:** Always validate `$INPUT` and `$PROMPT` exist after `mktemp`. A silent failure (permissions, disk full) produces an empty input file that makes the deduper output garbage with exit 0 — the hardest failure to diagnose.
+Behavior:
+- Writes scratch files to `~/.orchestra/panels/<panel-id>/dedupe/{input.md,prompt.md}` — per-panel dir, no `/tmp` collisions, no `mktemp` template pitfalls.
+- Refuses to fire if any lens's `final.md` is missing or empty (silent-failure guard).
+- Polls the deduper job's `exit_code` every 2s.
+- Exits non-zero on deduper failure or empty output. On success, stdout is the absolute path to the findings JSON (the deduper's `final.md`).
 
 ### 2B.6 — Verify false-positive labels (sober second opinion)
 
@@ -214,7 +136,7 @@ For each promotion, record the override: lens + finding title + the weak reason 
 
 ### 2B.7 — Decide
 
-- If the count of `valid` findings (after your verification pass) is **0** → write the marker for the current staged tree (which is the pre-fix tree). **DONE.** Retry the commit; the hook will consume the marker.
+- If the count of `valid` findings (after your verification pass) is **0** → write the marker for the current staged tree (which is the pre-fix tree) with `~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`. **DONE.** Retry the commit; the hook will consume the marker.
 - Else → fix.
 
 ### 2B.8 — Apply fixes (in-session)

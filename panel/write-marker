@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# write-marker: compute `git write-tree` for an effective cwd and create the
+# review-pipeline marker file the pre-commit hook consumes.
+#
+# Usage:
+#   write-marker <effective_cwd> [extra git args...]
+#
+# Pass the same `effective cwd` and `git globals` the hook printed
+# (e.g. --git-dir=X --work-tree=Y). The script:
+#   - Ensures $HOME/.orchestra/markers exists (mode 700).
+#   - Runs `git [extra args] -C <cwd> write-tree`.
+#   - Touches the marker file named after the resulting tree hash.
+#   - Prints "<tree-hash> <marker-path>" to stdout.
+
+set -euo pipefail
+
+CWD="${1:-}"
+[[ -n "$CWD" ]] || { echo "write-marker: usage: write-marker <effective_cwd> [extra git args...]" >&2; exit 2; }
+shift
+
+MDIR="$HOME/.orchestra/markers"
+install -d -m 700 "$MDIR"
+
+TREE=$(git "$@" -C "$CWD" write-tree)
+[[ -n "$TREE" ]] || { echo "write-marker: write-tree returned empty" >&2; exit 1; }
+
+MARKER="$MDIR/$TREE"
+touch "$MARKER"
+echo "$TREE $MARKER"

@@ -44,11 +44,6 @@ fi
 log() { printf '[install] %s\n' "$*"; }
 fail() { printf '[install] error: %s\n' "$*" >&2; exit 1; }
 
-# 0. Preflight: required external tools.
-# fswatch is used by SKILL.md 2B.3 to event-wait on lens jobs (no sleep loops).
-command -v fswatch >/dev/null 2>&1 \
-  || fail "fswatch not found on PATH. Install with: brew install fswatch (macOS) or apt install fswatch (Debian/Ubuntu)."
-
 # 1. Build the hook binary.
 log "building $HOOK_BIN_REL"
 ( cd "$SOURCE_ROOT" && go build -o "$HOOK_BIN_REL" ./hook/cmd/pre-commit-check )
