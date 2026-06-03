@@ -3,9 +3,15 @@
 #
 # Usage:
 #   review-panel --repo-root <path> \
-#                [--scope staged|branch:<base>] \
+#                [--scope staged|branch:<base>|tree:<hash>] \
 #                [--packet <path-to-shared-context-md>] \
 #                [--name SHORT]
+#
+# Scopes:
+#   staged       — git diff --cached (the default; round 1 of a review cycle).
+#   branch:BASE  — git diff BASE...HEAD (review a whole branch).
+#   tree:HASH    — git diff HASH <current-write-tree> (round 2+ — review only
+#                  the fix delta against a frozen baseline tree).
 #
 # Captures the diff once, generates 6 lens-specific prompts (shared review packet
 # + per-lens body from lenses/<name>.md), fires 3 codex-job + 3 claude-job in
@@ -61,8 +67,17 @@ case "$SCOPE" in
     DIFF_STAT=$(git -C "$REPO_ROOT" diff --stat "${BASE}...HEAD")
     SCOPE_LABEL="branch vs ${BASE}"
     ;;
+  tree:*)
+    BASE_TREE="${SCOPE#tree:}"
+    # Diff a frozen tree-hash against the current staged tree.
+    # Used by round 2+ of a review cycle to scope review to the fix delta.
+    CURRENT_TREE=$(git -C "$REPO_ROOT" write-tree)
+    DIFF=$(git -C "$REPO_ROOT" diff "${BASE_TREE}" "${CURRENT_TREE}")
+    DIFF_STAT=$(git -C "$REPO_ROOT" diff --stat "${BASE_TREE}" "${CURRENT_TREE}")
+    SCOPE_LABEL="fix delta vs frozen tree ${BASE_TREE:0:12}"
+    ;;
   *)
-    echo "review-panel: unknown scope: $SCOPE (expected staged or branch:<base>)" >&2
+    echo "review-panel: unknown scope: $SCOPE (expected staged, branch:<base>, or tree:<hash>)" >&2
     exit 2
     ;;
 esac
