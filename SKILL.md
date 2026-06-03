@@ -90,15 +90,31 @@ Use your TodoList (or scratch notes — the harness allows it) to hold this. The
 
 ### 2B.2 — Fire the panel
 
+**Round 1** (the first panel of the cycle — reviews the full staged diff):
+
 ```bash
 PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --repo-root <effective_cwd> \
   --scope staged \
   --packet /tmp/review-pipeline-packet-<slug>.md \
-  --name <short-slug>)
+  --name <short-slug>-r1)
 ```
 
-`review-panel` fires all 6 lenses in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` and lists which job-id each lens went to.
+**Round 2+** (reviews only the fix delta against the previous round's post-fix tree):
+
+```bash
+PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
+  --repo-root <effective_cwd> \
+  --scope "tree:$PREVIOUS_TREE" \
+  --packet /tmp/review-pipeline-packet-<slug>.md \
+  --name <short-slug>-r<N>)
+```
+
+Where `$PREVIOUS_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the lenses see is `<previous-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
+
+`review-panel` fires all 6 lenses in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` and lists which job-id each lens went to. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
+
+**Why frozen baseline on round 2+:** if round N re-reviewed the full `--cached` diff, the lenses would re-flag every line of the original feature plus the fixes you applied — including new tests, helper functions, and guards added in response to round-N-1 findings. That's the runaway-iteration dynamic. By scoping to the fix delta, the per-round review surface shrinks instead of growing.
 
 ### 2B.3 — Wait for the panel and validate
 
