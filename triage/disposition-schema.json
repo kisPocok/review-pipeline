@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConductorDispositions",
+  "description": "Per-finding outcomes recorded by the review-pipeline conductor after applying fixes or accepting risk. One file per panel (one panel per round).",
+  "type": "object",
+  "required": ["panel_id", "round", "findings_path", "dispositions"],
+  "additionalProperties": false,
+  "properties": {
+    "panel_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Panel-id this disposition applies to."
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-indexed round number within the review cycle."
+    },
+    "findings_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the deduper's findings.json this disposition covers."
+    },
+    "dispositions": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "outcome", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "pattern": "^F[0-9]{3,}$",
+            "description": "Matches the id field in the deduper's findings.json."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["fixed", "acknowledged", "false_positive"],
+            "description": "fixed = code change applied this round. acknowledged = real finding accepted as out-of-scope risk for this PR. false_positive = conductor agreed with deduper's FP label (or, if deduper labelled valid and conductor reclassified, conductor verified the finding does not apply)."
+          },
+          "deduper_override": {
+            "type": "boolean",
+            "default": false,
+            "description": "True iff the conductor disagreed with the deduper's verdict (promoted FP → valid, or rejected valid → false_positive)."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this outcome. For acknowledged, must justify why the finding is real but accepted (e.g., 'out-of-scope: PKCE is callback PR's work, tracked in NA-1071'). For false_positive, must cite the specific code that contradicts the finding. For fixed, a one-line summary of the change is sufficient."
+          },
+          "fix_files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "For outcome=fixed, the repo-relative paths touched. Optional but recommended for audit."
+          }
+        }
+      }
+    }
+  }
+}
