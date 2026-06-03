@@ -145,19 +145,72 @@ Behavior:
 - Polls the deduper job's `exit_code` every 2s.
 - Exits non-zero on deduper failure or empty output. On success, stdout is the absolute path to the findings JSON (the deduper's `final.md`).
 
-### 2B.6 — Verify false-positive labels (sober second opinion)
+### 2B.6 — Decide a disposition for every finding
 
-Read every `verdict: false_positive` entry in `findings.json`. For each, look at `verdict_reason`:
+For each finding in `findings.json`, decide exactly one outcome:
 
-- **Strong reason** (cites specific code that contradicts the finding): keep `false_positive`.
-- **Weak reason** ("probably fine", "could be intentional", "may be a known pattern", or anything not code-grounded): **promote back to `valid`**. The deduper still merges structurally — the safety net is you.
+| Outcome | When to use |
+|---|---|
+| `fixed` | You will apply a code change this round that addresses the finding. |
+| `acknowledged` | Finding is real and valid, but you are accepting the risk in this PR (out-of-scope, deferred to follow-up, spec-mandated, etc.). Must justify in `reason` and ideally cite where the deferral is tracked (e.g., `docs/X/SECURITY-NOTES.md` or a Linear/Jira ticket). |
+| `false_positive` | Either the deduper marked it FP and cited specific code that you verified, OR the deduper marked it valid but you verified specific code that contradicts it (in which case set `deduper_override: true`). |
 
-For each promotion, record the override: lens + finding title + the weak reason + your decision. Surface the override list to the user at the end of the loop alongside the fixes.
+For deduper-marked false-positives, look at `verdict_reason`:
 
-### 2B.7 — Decide
+- **Strong reason** (cites specific code that contradicts the finding): record `outcome: false_positive`, copy/paraphrase the deduper's cited code into your `reason`. `deduper_override: false`.
+- **Weak reason** ("probably fine", "could be intentional", "may be a known pattern", or anything not code-grounded): **override**. Re-classify as `fixed` or `acknowledged` depending on your decision. Set `deduper_override: true`. Cite your reason explicitly.
 
-- If the count of `valid` findings (after your verification pass) is **0** → write the marker for the current staged tree (which is the pre-fix tree) with `~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`. **DONE.** Retry the commit; the hook will consume the marker.
-- Else → fix.
+For deduper-marked valid findings, the override case (deduper said valid, you verify it doesn't apply) should be rare. When you do it, set `deduper_override: true`, record `outcome: false_positive`, and cite the specific code in `reason`.
+
+**`acknowledged` discipline.** This outcome exists to give you a legitimate exit ramp for findings that are real but not worth fixing in this PR. Use it for: PKCE/HMAC/rate-limiting in a non-security-focused PR; test-tightening on tests that already cover the changed behavior; architectural cleanups that span more files than the PR touches; spec-mandated behavior the lens didn't recognize. Do NOT use it as a synonym for "I don't feel like fixing this" — the reason must be defensible to a reviewer.
+
+### 2B.6.5 — Write the disposition file
+
+Build and write `~/.orchestra/panels/$PANEL_ID/dispositions.json` matching `triage/disposition-schema.json`:
+
+```json
+{
+  "panel_id": "<panel-id>",
+  "round": <1-indexed>,
+  "findings_path": "<absolute path to findings.json from run-dedupe>",
+  "dispositions": [
+    {"finding_id": "F001", "outcome": "fixed", "reason": "applied input length cap in <file>:<line>"},
+    {"finding_id": "F002", "outcome": "acknowledged", "reason": "PKCE deferred to callback PR; tracked in docs/sso/SECURITY-NOTES.md"},
+    {"finding_id": "F003", "outcome": "false_positive", "deduper_override": false, "reason": "deduper cited middleware.Recoverer at routes.go:18; verified."}
+  ]
+}
+```
+
+Write the file before applying fixes (your decisions are made; the file records them). If you change your mind mid-fix (e.g., a `fixed` finding turns out to need a redesign), update the file to `acknowledged` with a reason before refiring the next round.
+
+Validate the file is well-formed JSON:
+
+```bash
+jq empty ~/.orchestra/panels/$PANEL_ID/dispositions.json && echo "dispositions OK"
+```
+
+### 2B.7 — Decide whether to continue
+
+Count outcomes from the disposition file you just wrote:
+
+- `fixed_count` — findings you will apply code changes for this round.
+- `acknowledged_count` — findings you accepted as out-of-scope risk.
+- `false_positive_count` — findings you dismissed.
+
+**Terminal cases:**
+
+- If `fixed_count == 0` → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
+
+**Convergence gate (LOW-only):**
+
+- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` in `findings.json` (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
+  1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
+  2. **Fix and ship.** Apply the LOW fixes this round, but write the marker after this round without refiring another panel. No round N+1.
+  3. **Fix and continue.** Apply the LOWs and refire (standard loop). Only choose this if there's a concrete reason to expect new HIGHs hiding behind the LOW fixes.
+
+  Surface the LOW finding titles in the question text so the user can judge.
+
+- Otherwise (HIGH/CRITICAL/MEDIUM remain to fix) → proceed to 2B.8 (apply fixes), then 2B.9 (re-stage and refire).
 
 ### 2B.8 — Apply fixes (in-session)
 
