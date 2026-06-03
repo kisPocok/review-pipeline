@@ -73,6 +73,21 @@ Mandatory sections (write `None — <one-sentence reason>` if a section is genui
 
 Save to `/tmp/review-pipeline-packet-<slug>.md`. **Never inline this as a heredoc** — always pass via `--packet <path>`.
 
+### 2B.1.5 — Cycle concept (read before firing the panel)
+
+A "cycle" is the sequence of rounds (panel → fix → panel → fix → ...) needed to clear one staged diff. Each round is its own panel-id, but they share a baseline:
+
+- **Round 1** reviews the full diff (`--scope staged`, the default). This is the *original* feature being reviewed.
+- **Round 2+** reviews **only the fix delta** since the previous round — `--scope tree:<post-fix-tree-from-round-N-1>`. This prevents already-reviewed code from being re-flagged on every round.
+
+You will need to track in-session, per cycle:
+
+- An array of panel-ids, one per round, in order
+- The post-fix tree hash captured at the end of each round (used as the baseline for the next round)
+- For each panel-id, the path to its `dispositions.json` (written by you in 2B.7)
+
+Use your TodoList (or scratch notes — the harness allows it) to hold this. There is no persistent cycle state file; the data is derivable from `~/.orchestra/panels/<panel-id>/` for any panel-id you remember.
+
 ### 2B.2 — Fire the panel
 
 ```bash
