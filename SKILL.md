@@ -222,19 +222,60 @@ You apply the fixes yourself, using your own Edit/Write/Grep/Bash tools. No fixe
 
 Process findings in severity order: critical → high → medium → low. Within a severity, file-group them to avoid multiple seeks to the same file.
 
-### 2B.9 — Re-stage and loop
+### 2B.9 — Re-stage, capture post-fix tree, and loop
 
 ```bash
 git -C <effective_cwd> add -u
+POST_FIX_TREE=$(git -C <effective_cwd> write-tree)
+echo "round $ROUND post-fix tree: $POST_FIX_TREE"
 ```
 
-The tree hash has now changed. The pre-fix marker (if any) is irrelevant. Round counter += 1.
+Record `$POST_FIX_TREE` in your in-session cycle state alongside the panel-id. This is the baseline for round N+1's `--scope tree:$POST_FIX_TREE` (per 2B.2).
 
-- **If round < MAX_ROUNDS (3)** → go back to step 2B.2 (fire panel for the new tree).
-- **If round == MAX_ROUNDS** → STOP. Surface to the user:
-  - The findings remaining (with reasons each fix could not be applied).
-  - The overrides you made on FP labels in each round.
-  - Ask the user what to do: accept remaining findings and ship (they write the marker manually), defer to a follow-up PR, or continue past MAX_ROUNDS (explicit override).
+The pre-fix marker (if any) is irrelevant — the tree has changed. Round counter += 1.
+
+- **If round < MAX_ROUNDS (3)** → go back to step 2B.2 (fire round-N+1 panel with `--scope tree:$POST_FIX_TREE`).
+- **If round == MAX_ROUNDS** → STOP. **Do not refire.** Surface to the user with a severity-trend table.
+
+### 2B.9.1 — MAX_ROUNDS severity surface
+
+When you hit MAX_ROUNDS, the user needs to choose: ship, defer, or explicitly override the cap. Give them the data to decide. Build a per-round severity-and-outcome table by walking each panel-id in your cycle state:
+
+```bash
+for panel_id in <your-list-of-panel-ids>; do
+  fpath=~/.orchestra/panels/$panel_id/dispositions.json
+  if [ ! -f "$fpath" ]; then continue; fi
+  jq -r --arg pid "$panel_id" '
+    [.dispositions[] | .outcome] | group_by(.) | map({(.[0]): length}) | add
+    | . + {panel_id: $pid, round: 1}
+  ' "$fpath"
+done
+```
+
+(Adapt to your needs — the goal is to print a table, not run that exact pipeline. You can also `jq` over the per-round findings JSON to get severity counts since dispositions don't carry severity.)
+
+Surface a table like this in your response (the format is what matters; build it however):
+
+```
+Cycle summary (3 rounds)
+
+Round | High | Med | Low | fixed | ack | fp | scope
+------|------|-----|-----|-------|-----|----|-----------
+   1  |   5  |  10 |   8 |   18  |  5  |  0 | staged
+   2  |   2  |   4 |   3 |    8  |  1  |  0 | tree:abc12
+   3  |   0  |   1 |  14 |    9  |  6  |  0 | tree:def34
+
+Remaining (round 3 fixed but unfired): 0 H / 1 M / 14 L
+```
+
+Then ask the user with `AskUserQuestion`:
+
+1. **Ship with current fixes.** Round-3 fixes are applied; write the marker, retry the commit. The 14 LOWs aren't refired against. (Recommended when remaining is L-heavy.)
+2. **Acknowledge and ship.** Update round-3 dispositions to `acknowledged` for the items you don't want to fix, then write the marker.
+3. **Defer to a follow-up PR.** Stage your current fixes, commit; open a follow-up PR for the remaining findings.
+4. **Continue past MAX_ROUNDS.** Only choose this if a HIGH/CRITICAL is in the remaining list. If the table shows zero HIGH+CRITICAL, this option is almost always wrong.
+
+Include the override list (your `deduper_override: true` dispositions across all rounds) in your response so the user can audit.
 
 ## Async handling rules
 
