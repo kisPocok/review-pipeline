@@ -68,8 +68,7 @@ case "$TIER" in
   *) echo "claude-job: unknown tier: $TIER" >&2; exit 2 ;;
 esac
 
-# --effort overrides the tier's default effort (e.g. `--tier standard --effort xhigh`
-# for Sonnet at xhigh, used by the review-pipeline deduper).
+# --effort overrides the tier's default effort (e.g. `--tier standard --effort xhigh`).
 if [[ -n "$EFFORT_OVERRIDE" ]]; then
   EFFORT="$EFFORT_OVERRIDE"
 fi

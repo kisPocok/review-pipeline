@@ -1,6 +1,6 @@
 # review-pipeline
 
-Commit-time code review for Claude Code. Every non-trivial `git commit` triggers a 6-lens panel (3 Codex + 3 Claude in parallel), deduped by Sonnet, with main Claude as conductor. Fix loop bounded at 3 rounds.
+Commit-time code review for Claude Code. Every non-trivial `git commit` triggers a 6-lens panel (3 Codex + 3 Claude in parallel), deduped by Opus xhigh, with main Claude as conductor. Fix loop bounded at 3 rounds.
 
 A Go `PreToolUse` hook blocks `git commit` until `~/.orchestra/markers/<git-write-tree>` exists. Claude reads the hook stderr, opens `SKILL.md`, runs the panel, applies fixes, writes the marker, retries.
 
@@ -15,7 +15,7 @@ A Go `PreToolUse` hook blocks `git commit` until `~/.orchestra/markers/<git-writ
 | frontend           | Claude | strongest |
 | test_effectiveness | Claude | strongest |
 
-Dedupe: Claude `sonnet xhigh` → structured JSON (`verdict: valid|false_positive`).
+Dedupe: Claude `opus xhigh` → structured JSON (`verdict: valid|false_positive`).
 
 ## Install
 
@@ -53,7 +53,7 @@ review-pipeline/
 │   ├── preflight                           # warm-up permissions / deps
 │   ├── review-panel                        # fires 6 lens jobs, writes manifest
 │   ├── wait-panel                          # polls until all 6 exit_code files land
-│   ├── run-dedupe                          # assembles reports, fires Sonnet deduper
+│   ├── run-dedupe                          # assembles reports, fires Opus deduper
 │   ├── write-marker                        # write-tree + touch marker
 │   └── lenses.sh                           # static 6-lens config
 ├── lenses/                                 # one prompt per lens

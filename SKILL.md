@@ -1,6 +1,6 @@
 ---
 name: review-pipeline
-description: How to respond when the review-pipeline pre-commit hook blocks a `git commit`. Fires a 6-lens panel (3 Codex high + 3 Opus xhigh) in parallel, runs a Sonnet xhigh deduper to merge findings into structured JSON, sober-second-opinions the false-positive labels, applies fixes in-session (no fixer subprocess), re-stages, then loops up to MAX_ROUNDS=3 until the panel is clean and the marker is written for the post-fix tree.
+description: Use when the user asks for a code review, or when the pre-commit / PreToolUse hook blocks a `git commit` on this repo. Triggers on phrases like "review my changes", "check this diff", "review the branch", or any time a commit is intercepted and needs to clear before retrying.
 ---
 
 # review-pipeline
@@ -9,7 +9,7 @@ A multi-lens commit-time review. The Go hook at `~/.claude/skills/review-pipelin
 
 ## ⛔ FIRST ACTION — Pre-flight permission warm-up (DO NOT SKIP)
 
-**STOP. This is the first thing you do when this skill is invoked.** Before reading the rest of this file, before looking at `git diff`, before classifying anything — run the block below. It surfaces every permission prompt the pipeline will trigger, upfront, in one shot. **Skip this and the async pipeline stalls mid-run waiting for approval the agent firing it cannot give**, silently — you will not get a useful error, just a hang.
+🛑 **STOP. This is the first thing you do when this skill is invoked.** Before reading the rest of this file, before looking at `git diff`, before classifying anything — run the block below. It surfaces every permission prompt the pipeline will trigger, upfront, in one shot. **Skip this and the async pipeline stalls mid-run waiting for approval the agent firing it cannot give**, silently — you will not get a useful error, just a hang.
 
 This is not optional setup. This is not "if you have time". This is the first action. Run the command, confirm it prints `pre-flight OK`, then continue to "How this skill is triggered".
 
@@ -18,17 +18,6 @@ This is not optional setup. This is not "if you have time". This is the first ac
 ```
 
 The script creates the runtime dirs, smoke-tests `/tmp` writability, verifies every pipeline script is present and executable, and confirms `jq`, `git`, `claude`, `codex` are on `PATH`. If it exits non-zero, stop and fix the failure it printed before continuing. Do not proceed with a partial pre-flight.
-
-## How this skill is triggered
-
-The hook decides; you don't. When you run `git commit -m "..."` and the hook prints stderr containing **`STOP. Invoke the \`review-pipeline\` skill BEFORE this commit.`**, follow this playbook. The hook also prints:
-- `effective cwd`
-- `git globals` (the `--git-dir` / `--work-tree` form to use when computing write-tree)
-- `staged tree` (the hash the marker must match)
-
-Use those exact values. Don't recompute or guess.
-
-This skill is also triggered directly when the user says "review this", "send to panel", "run the review pipeline", or similar — outside a commit attempt. In that case, run the non-trivial path without the marker dance.
 
 ## Step 1 — Classify the staged diff
 
@@ -113,7 +102,7 @@ Behavior:
 
 ### 2B.5 — Run the deduper
 
-One command builds the dedupe input from the 6 `final.md`s, fires a Sonnet xhigh job with the JSON schema, waits for completion, and prints the path to the findings JSON:
+One command builds the dedupe input from the 6 `final.md`s, fires an Opus xhigh deduper job with the JSON schema, waits for completion, and prints the path to the findings JSON:
 
 ```bash
 FINDINGS_JSON=$(~/.claude/skills/review-pipeline/panel/run-dedupe "$PANEL_ID")
@@ -130,7 +119,7 @@ Behavior:
 Read every `verdict: false_positive` entry in `findings.json`. For each, look at `verdict_reason`:
 
 - **Strong reason** (cites specific code that contradicts the finding): keep `false_positive`.
-- **Weak reason** ("probably fine", "could be intentional", "may be a known pattern", or anything not code-grounded): **promote back to `valid`**. The deduper is Sonnet, not Opus — the safety net is you.
+- **Weak reason** ("probably fine", "could be intentional", "may be a known pattern", or anything not code-grounded): **promote back to `valid`**. The deduper still merges structurally — the safety net is you.
 
 For each promotion, record the override: lens + finding title + the weak reason + your decision. Surface the override list to the user at the end of the loop alongside the fixes.
 
@@ -172,20 +161,20 @@ The tree hash has now changed. The pre-fix marker (if any) is irrelevant. Round 
 
 ## Defaults
 
-| Parameter   | Value             | Rationale |
-|---|---|---|
-| Lens count  | always 6          | The panel is the whole point of v2 — don't drop lenses heuristically |
-| Lens tier   | `strongest`       | Opus xhigh + Codex high (local codex caps at `high`) — anything weaker defeats the purpose |
-| Deduper tier| Sonnet + xhigh (`--tier standard --effort xhigh`) | Judgment is your job; deduper does structural merging |
-| MAX_ROUNDS  | 3                 | Hard ceiling; surface to user past this |
-| Trivial bypass | always classify first | Doc fixes don't deserve a $5 panel |
+| Parameter      | Value                    | Rationale                                                                                  |
+| -------------- | ------------------------ | ------------------------------------------------------------------------------------------ |
+| Lens count     | always 6                 | The panel is the whole point of v2 — don't drop lenses heuristically                       |
+| Lens tier      | `strongest`              | Opus xhigh + Codex high (local codex caps at `high`) — anything weaker defeats the purpose |
+| Deduper tier   | `strongest` (Opus xhigh) | Same tier as Claude lenses; better merge + FP judgment                                     |
+| MAX_ROUNDS     | 3                        | Hard ceiling; surface to user past this                                                    |
+| Trivial bypass | always classify first    | Doc fixes don't deserve a $5 panel                                                         |
 
 ## Anti-patterns
 
 - ❌ **Generic packet.** "Just review this diff" → generic results. Fill in every section of the packet template.
 - ❌ **Fire and forget.** Always come back for the panel result before committing.
 - ❌ **Ignoring low/medium findings to save time.** If they're valid (after your FP verification), fix them.
-- ❌ **Blindly applying the deduper's FP labels.** It's Sonnet, not Opus. Verify each rejection's reason has code citations.
+- ❌ **Blindly applying the deduper's FP labels.** Verify each rejection's reason has code citations.
 - ❌ **Skipping FP verification because "the panel seems clean."** If the deduper reports `rejected_count > 0`, you read every rejection.
 - ❌ **Treating a non-zero `exit_code` as "no findings — looks clean."** Inspect `stderr.log` first.
 - ❌ **Writing the marker on partial-panel completion.** All 6 lenses must finish cleanly.

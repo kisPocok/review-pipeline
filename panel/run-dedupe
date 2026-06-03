@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# run-dedupe: assemble the 6 lens reports, fire the Sonnet xhigh deduper, wait.
+# run-dedupe: assemble the 6 lens reports, fire the Opus xhigh deduper, wait.
 #
 # Usage:
 #   run-dedupe <panel-id>
 #
 # Reads $HOME/.orchestra/panels/<panel-id>/manifest.json, concatenates each
 # lens's final.md into a single input, prepends the deduper prompt, and fires
-# claude-job (--tier standard --effort xhigh --mode research) with the JSON
+# claude-job (--tier strongest --mode research) with the JSON
 # schema. Waits for completion, then prints the path to the deduper's final.md
 # (which contains the structured findings JSON).
 #
@@ -60,8 +60,7 @@ done
 cat "$DEDUPER_PROMPT" "$INPUT" > "$PROMPT"
 
 DEDUPE_JOB=$("$CLAUDE_JOB" \
-  --tier standard \
-  --effort xhigh \
+  --tier strongest \
   --mode research \
   --name "${PANEL_ID}-dedupe" \
   --repo-root "$REPO_ROOT" \
