@@ -19,7 +19,7 @@
     "findings_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the deduper's findings.json this disposition covers."
+      "description": "Absolute path to the deduper's final.md (the structured findings JSON) this disposition covers."
     },
     "dispositions": {
       "type": "array",

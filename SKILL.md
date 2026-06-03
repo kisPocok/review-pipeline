@@ -105,12 +105,12 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
 ```bash
 PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --repo-root <effective_cwd> \
-  --scope "tree:$PREVIOUS_TREE" \
+  --scope "tree:$POST_FIX_TREE" \
   --packet /tmp/review-pipeline-packet-<slug>.md \
   --name <short-slug>-r<N>)
 ```
 
-Where `$PREVIOUS_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the lenses see is `<previous-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
+Where `$POST_FIX_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the lenses see is `<post-fix-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
 
 `review-panel` fires all 6 lenses in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` and lists which job-id each lens went to. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
 
