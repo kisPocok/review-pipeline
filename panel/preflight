@@ -29,13 +29,15 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 for f in \
   "$SKILL_DIR/panel/review-panel" \
   "$SKILL_DIR/panel/wait-panel" \
-  "$SKILL_DIR/panel/run-dedupe" \
   "$SKILL_DIR/panel/write-marker" \
   "$SKILL_DIR/jobs/claude-job" \
   "$SKILL_DIR/jobs/codex-job"
 do
   [[ -x "$f" ]] || { echo "preflight: missing or non-executable: $f" >&2; exit 1; }
 done
+
+[[ -f "$SKILL_DIR/panel/reviewer-preamble.md" ]] \
+  || { echo "preflight: missing $SKILL_DIR/panel/reviewer-preamble.md" >&2; exit 1; }
 
 # 4. Required external tools.
 command -v jq      >/dev/null || { echo "preflight: jq not on PATH" >&2; exit 1; }
