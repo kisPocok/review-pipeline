@@ -110,7 +110,7 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --name <short-slug>-r<N>)
 ```
 
-Where `$POST_FIX_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the lenses see is `<post-fix-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
+Where `$POST_FIX_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the reviewers see is `<post-fix-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
 
 `review-panel` fires both reviewers (one `claude-job`, one `codex-job`) in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` under a `reviewers` object (`claude`, `codex`), each with its job-id. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
 
@@ -190,7 +190,7 @@ Count outcomes from the disposition file you just wrote:
 
 **Convergence gate (LOW-only):**
 
-- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` in the findings JSON (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
+- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` across the two reviewer reports (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
   1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
   2. **Fix and ship.** Apply the LOW fixes this round, but write the marker after this round without refiring another panel. No round N+1.
   3. **Fix and continue.** Apply the LOWs and refire (standard loop). Only choose this if there's a concrete reason to expect new HIGHs hiding behind the LOW fixes.
@@ -205,7 +205,7 @@ You apply the fixes yourself, using your own Edit/Write/Grep/Bash tools. No fixe
 
 **Fixer discipline (mandatory):**
 
-> Apply exactly the changes the `verdict: valid` findings call for. Do not refactor unrelated code; do not improve naming/comments unless a finding cites it; do not add tests unless a finding requests them. After each fix, briefly note what changed (1 line) in your response to the user. Run typecheck / tests after each fix when the project supports it (look at the project's CLAUDE.md or `package.json` / `go.mod` for the command); if a fix breaks something, adjust and continue. If a finding cannot be addressed within the original change's scope (requires a redesign, a separate migration, out-of-scope test infrastructure, etc.) — defer it unilaterally. List it in your response with a one-line reason, then proceed to write the marker and commit. Do NOT use `AskUserQuestion` to ask for permission to defer. "Surface as deferred" means note it in your response, not block on a question.
+> Apply exactly the changes the valid findings call for. Do not refactor unrelated code; do not improve naming/comments unless a finding cites it; do not add tests unless a finding requests them. After each fix, briefly note what changed (1 line) in your response to the user. Run typecheck / tests after each fix when the project supports it (look at the project's CLAUDE.md or `package.json` / `go.mod` for the command); if a fix breaks something, adjust and continue. If a finding cannot be addressed within the original change's scope (requires a redesign, a separate migration, out-of-scope test infrastructure, etc.) — defer it unilaterally. List it in your response with a one-line reason, then proceed to write the marker and commit. Do NOT use `AskUserQuestion` to ask for permission to defer. "Surface as deferred" means note it in your response, not block on a question.
 
 Process findings in severity order: critical → high → medium → low. Within a severity, file-group them to avoid multiple seeks to the same file.
 
