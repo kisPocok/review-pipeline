@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ConductorDispositions",
-  "description": "Per-finding outcomes recorded by the review-pipeline conductor after applying fixes or accepting risk. One file per panel (one panel per round).",
+  "description": "Per-finding outcomes recorded by the main agent after reconciling the two reviewer reports and applying fixes or accepting risk. One file per panel (one panel per round).",
   "type": "object",
   "required": ["panel_id", "round", "findings_path", "dispositions"],
   "additionalProperties": false,
@@ -19,7 +19,7 @@
     "findings_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the deduper's final.md (the structured findings JSON) this disposition covers."
+      "description": "Absolute path to the panel dir (~/.orchestra/panels/<panel-id>/) whose two reviewer reports this disposition covers."
     },
     "dispositions": {
       "type": "array",
@@ -32,22 +32,17 @@
           "finding_id": {
             "type": "string",
             "pattern": "^F[0-9]{3,}$",
-            "description": "Matches the id field in the deduper's findings.json."
+            "description": "Stable id the main agent assigns to each distinct finding while reconciling the two reviewer reports (e.g. F001)."
           },
           "outcome": {
             "type": "string",
             "enum": ["fixed", "acknowledged", "false_positive"],
-            "description": "fixed = code change applied this round. acknowledged = real finding accepted as out-of-scope risk for this PR. false_positive = conductor agreed with deduper's FP label (or, if deduper labelled valid and conductor reclassified, conductor verified the finding does not apply)."
-          },
-          "deduper_override": {
-            "type": "boolean",
-            "default": false,
-            "description": "True iff the conductor disagreed with the deduper's verdict (promoted FP → valid, or rejected valid → false_positive)."
+            "description": "fixed = code change applied this round. acknowledged = real finding accepted as unrelated/out-of-scope for this change. false_positive = main agent verified the finding does not apply (cite the contradicting code in reason)."
           },
           "reason": {
             "type": "string",
             "minLength": 1,
-            "description": "Why this outcome. For acknowledged, must justify why the finding is real but accepted (e.g., 'out-of-scope: PKCE is callback PR's work, tracked in NA-1071'). For false_positive, must cite the specific code that contradicts the finding. For fixed, a one-line summary of the change is sufficient."
+            "description": "Why this outcome. For acknowledged, must justify why the finding is unrelated/out-of-scope (e.g., 'pre-existing issue outside this change, tracked in NA-1071'). For false_positive, must cite the specific code that contradicts the finding. For fixed, a one-line summary of the change is sufficient."
           },
           "fix_files": {
             "type": "array",
