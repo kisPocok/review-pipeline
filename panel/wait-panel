@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# wait-panel: block until all 6 lens jobs for a panel finish, then validate.
+# wait-panel: block until both reviewer jobs for a panel finish, then validate.
 #
 # Usage:
 #   wait-panel <panel-id>
 #
 # Reads $HOME/.orchestra/panels/<panel-id>/manifest.json and polls (every 2s)
-# for every lens job's exit_code file. Validates each lens:
+# for every reviewer job's exit_code file. Validates each reviewer:
 #   - exit_code is 0
 #   - final.md exists and size > 0
 #   - final.md contains a severity header OR the "No findings." sentinel
 #
 # Prints one stderr line per state change while waiting and a final summary
 # table to stdout. Exits:
-#   0 — all 6 lenses passed validation
-#   1 — at least one lens failed (non-zero exit, empty final.md, or invalid)
+#   0 — both reviewer jobs passed validation
+#   1 — at least one reviewer failed (non-zero exit, empty final.md, or invalid)
 #   2 — bad usage / missing manifest
 
 set -euo pipefail
@@ -26,14 +26,14 @@ MANIFEST="$PANEL_DIR/manifest.json"
 [[ -f "$MANIFEST" ]] || { echo "wait-panel: manifest not found at $MANIFEST" >&2; exit 2; }
 command -v jq      >/dev/null || { echo "wait-panel: jq not installed" >&2; exit 2; }
 
-LENSES=(security architecture quality security_xcheck frontend test_effectiveness)
+REVIEWERS=(claude codex)
 
 count_done() {
   local n=0
-  for lens in "${LENSES[@]}"; do
+  for reviewer in "${REVIEWERS[@]}"; do
     local jid runner
-    jid=$(jq -r ".lenses.$lens.job_id" "$MANIFEST")
-    runner=$(jq -r ".lenses.$lens.runner" "$MANIFEST")
+    jid=$(jq -r ".reviewers.$reviewer.job_id" "$MANIFEST")
+    runner=$(jq -r ".reviewers.$reviewer.runner" "$MANIFEST")
     [[ -f "$HOME/.orchestra/jobs/$runner/$jid/exit_code" ]] && n=$((n+1))
   done
   echo "$n"
@@ -45,19 +45,19 @@ LAST=-1
 while :; do
   DONE=$(count_done)
   if [[ "$DONE" != "$LAST" ]]; then
-    echo "wait-panel: $DONE/6 done" >&2
+    echo "wait-panel: $DONE/2 done" >&2
     LAST=$DONE
   fi
-  [[ "$DONE" -ge 6 ]] && break
+  [[ "$DONE" -ge 2 ]] && break
   sleep 2
 done
 
 # Validate.
 FAIL=0
-printf "%-22s %-7s %-12s %-12s %s\n" "lens" "exit" "final.md" "verdict" "notes"
-for lens in "${LENSES[@]}"; do
-  jid=$(jq -r ".lenses.$lens.job_id" "$MANIFEST")
-  runner=$(jq -r ".lenses.$lens.runner" "$MANIFEST")
+printf "%-22s %-7s %-12s %-12s %s\n" "reviewer" "exit" "final.md" "verdict" "notes"
+for reviewer in "${REVIEWERS[@]}"; do
+  jid=$(jq -r ".reviewers.$reviewer.job_id" "$MANIFEST")
+  runner=$(jq -r ".reviewers.$reviewer.runner" "$MANIFEST")
   dir="$HOME/.orchestra/jobs/$runner/$jid"
   ec=$(cat "$dir/exit_code" 2>/dev/null || echo "?")
   size=$(wc -c < "$dir/final.md" 2>/dev/null || echo 0)
@@ -72,7 +72,7 @@ for lens in "${LENSES[@]}"; do
   elif ! grep -qE '^## (Critical|High|Medium|Low)|No findings\.' "$dir/final.md"; then
     verdict="FAIL"; note="missing severity header or 'No findings.'"; FAIL=1
   fi
-  printf "%-22s %-7s %-12s %-12s %s\n" "$lens" "$ec" "${size}B" "$verdict" "$note"
+  printf "%-22s %-7s %-12s %-12s %s\n" "$reviewer" "$ec" "${size}B" "$verdict" "$note"
 done
 
 exit "$FAIL"
