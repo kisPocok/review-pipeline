@@ -98,7 +98,7 @@ PANEL_ID="${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
 PANEL_DIR="$HOME/.orchestra/panels/$PANEL_ID"
 mkdir -p "$PANEL_DIR"
 
-# Persist the shared context block once so each lens prompt can include it.
+# Persist the shared context block once so the reviewer prompt can include it.
 SHARED_PACKET="$PANEL_DIR/packet.md"
 if [[ -n "$PACKET" && -f "$PACKET" ]]; then
   cp "$PACKET" "$SHARED_PACKET"
