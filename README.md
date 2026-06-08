@@ -1,21 +1,19 @@
 # review-pipeline
 
-Commit-time code review for Claude Code. Every non-trivial `git commit` triggers a 6-lens panel (3 Codex + 3 Claude in parallel), deduped by Opus xhigh, with main Claude as conductor. Fix loop bounded at 3 rounds.
+Commit-time code review for Claude Code. Every non-trivial `git commit` triggers two reviewers (one Codex, one Claude, in parallel) over a shared prompt — a fixed preamble plus a per-diff packet. Main Claude reconciles both reviews directly and applies fixes. Fix loop bounded at 3 rounds.
 
-A Go `PreToolUse` hook blocks `git commit` until `~/.orchestra/markers/<git-write-tree>` exists. Claude reads the hook stderr, opens `SKILL.md`, runs the panel, applies fixes, writes the marker, retries.
+A Go `PreToolUse` hook blocks `git commit` until `~/.orchestra/markers/<git-write-tree>` exists. Claude reads the hook stderr, opens `SKILL.md`, runs the reviewers, reconciles and applies fixes, writes the marker, retries.
 
-## Lenses
+## Reviewers
 
-| Lens               | Runner | Tier      |
-|--------------------|--------|-----------|
-| security           | Codex  | strongest |
-| architecture       | Codex  | strongest |
-| quality            | Codex  | strongest |
-| security_xcheck    | Claude | strongest |
-| frontend           | Claude | strongest |
-| test_effectiveness | Claude | strongest |
+Two reviewers run in parallel over the same prompt; diversity comes from the models, not differing instructions.
 
-Dedupe: Claude `opus xhigh` → structured JSON (`verdict: valid|false_positive`).
+| Reviewer | Runner | Tier      |
+|----------|--------|-----------|
+| codex    | Codex  | strongest |
+| claude   | Claude | strongest |
+
+Both prompts begin with a fixed preamble (`panel/reviewer-preamble.md`) covering four standing concerns — correctness, readability/maintainability, test quality, security — and the severity output format. Main Claude reads both reviews, reconciles overlaps and false positives itself, and records a per-finding outcome (`fixed` / `acknowledged` / `false_positive`) in `triage/disposition-schema.json`.
 
 ## Install
 
@@ -51,14 +49,11 @@ review-pipeline/
 │   └── claude-job                          # async claude -p primitive
 ├── panel/
 │   ├── preflight                           # warm-up permissions / deps
-│   ├── review-panel                        # fires 6 lens jobs, writes manifest
-│   ├── wait-panel                          # polls until all 6 exit_code files land
-│   ├── run-dedupe                          # assembles reports, fires Opus deduper
+│   ├── review-panel                        # fires 2 reviewer jobs, writes manifest
+│   ├── wait-panel                          # polls until both exit_code files land
 │   ├── write-marker                        # write-tree + touch marker
-│   └── lenses.sh                           # static 6-lens config
-├── lenses/                                 # one prompt per lens
+│   └── reviewer-preamble.md               # fixed preamble: 4 concerns + output format
 ├── triage/
-│   ├── deduper-prompt.md
-│   └── deduper-schema.json
+│   └── disposition-schema.json             # per-finding outcomes recorded by main Claude
 └── go.mod / go.sum                         # mvdan.cc/sh/v3 for the hook
 ```
