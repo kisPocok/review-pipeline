@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# review-panel: fire all 6 review-pipeline lenses in parallel against a repo.
+# review-panel: fire two reviewers in parallel against a repo.
 #
 # Usage:
 #   review-panel --repo-root <path> \
@@ -13,9 +13,9 @@
 #   tree:HASH    — git diff HASH <current-write-tree> (round 2+ — review only
 #                  the fix delta against a frozen baseline tree).
 #
-# Captures the diff once, generates 6 lens-specific prompts (shared review packet
-# + per-lens body from lenses/<name>.md), fires 3 codex-job + 3 claude-job in
-# parallel, and writes a manifest at $HOME/.orchestra/panels/<panel-id>/manifest.json.
+# Builds one reviewer prompt (fixed preamble + shared packet + scoped diff) and
+# fires one claude-job + one codex-job in parallel, writing a manifest at
+# $HOME/.orchestra/panels/<panel-id>/manifest.json.
 #
 # Prints the panel-id on stdout. Poll the manifest by checking each job's
 # exit_code file under ~/.orchestra/jobs/{codex,claude}/<job-id>/.
@@ -42,17 +42,14 @@ done
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SKILL_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-LENS_DIR="$SKILL_ROOT/lenses"
 JOBS_DIR="$SKILL_ROOT/jobs"
-CODEX_JOB="$JOBS_DIR/codex-job"
-CLAUDE_JOB="$JOBS_DIR/claude-job"
+CODEX_JOB="${REVIEW_PIPELINE_CODEX_JOB:-$JOBS_DIR/codex-job}"
+CLAUDE_JOB="${REVIEW_PIPELINE_CLAUDE_JOB:-$JOBS_DIR/claude-job}"
+PREAMBLE="$SKILL_ROOT/panel/reviewer-preamble.md"
 
-[[ -d "$LENS_DIR"     ]] || { echo "review-panel: lenses dir missing at $LENS_DIR" >&2; exit 2; }
 [[ -x "$CODEX_JOB"    ]] || { echo "review-panel: codex-job missing at $CODEX_JOB" >&2; exit 2; }
 [[ -x "$CLAUDE_JOB"   ]] || { echo "review-panel: claude-job missing at $CLAUDE_JOB" >&2; exit 2; }
-
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/lenses.sh"
+[[ -f "$PREAMBLE"     ]] || { echo "review-panel: reviewer-preamble.md missing at $PREAMBLE" >&2; exit 2; }
 
 # Capture the diff once for all lenses.
 case "$SCOPE" in
@@ -99,8 +96,7 @@ GIT_STATUS=$(git -C "$REPO_ROOT" status --short)
 NAME=$(echo "$NAME" | tr -c '[:alnum:]-_' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')
 PANEL_ID="${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
 PANEL_DIR="$HOME/.orchestra/panels/$PANEL_ID"
-PROMPT_DIR="$PANEL_DIR/prompts"
-mkdir -p "$PROMPT_DIR"
+mkdir -p "$PANEL_DIR"
 
 # Persist the shared context block once so each lens prompt can include it.
 SHARED_PACKET="$PANEL_DIR/packet.md"
@@ -146,40 +142,31 @@ SHARED_HEADER="$PANEL_DIR/header.md"
   echo
 } > "$SHARED_HEADER"
 
-# Render each lens prompt and fire the corresponding job.
-declare -a ENTRIES=()
-for entry in "${LENSES[@]}"; do
-  IFS='|' read -r NAME_L RUNNER TIER TEMPLATE <<<"$entry"
-  TEMPLATE_PATH="$LENS_DIR/$TEMPLATE"
-  [[ -f "$TEMPLATE_PATH" ]] || { echo "review-panel: lens template missing: $TEMPLATE_PATH" >&2; exit 2; }
+# Build one shared reviewer prompt: fixed preamble + packet/diff header.
+PROMPT="$PANEL_DIR/prompt.md"
+{
+  cat "$PREAMBLE"
+  echo
+  echo "---"
+  echo
+  cat "$SHARED_HEADER"
+} > "$PROMPT"
 
-  PROMPT="$PROMPT_DIR/${NAME_L}.md"
-  {
-    cat "$SHARED_HEADER"
-    echo
-    echo "---"
-    echo
-    cat "$TEMPLATE_PATH"
-  } > "$PROMPT"
+# Fire exactly two reviewers with the same prompt; diversity comes from the models.
+CLAUDE_JOB_ID=$("$CLAUDE_JOB" \
+  --tier strongest \
+  --mode review \
+  --name "${PANEL_ID}-claude" \
+  --repo-root "$REPO_ROOT" \
+  --prompt-file "$PROMPT")
 
-  case "$RUNNER" in
-    codex)  JOB_BIN="$CODEX_JOB"  ;;
-    claude) JOB_BIN="$CLAUDE_JOB" ;;
-    *) echo "review-panel: unknown runner '$RUNNER' for lens $NAME_L" >&2; exit 2 ;;
-  esac
+CODEX_JOB_ID=$("$CODEX_JOB" \
+  --tier strongest \
+  --mode review \
+  --name "${PANEL_ID}-codex" \
+  --repo-root "$REPO_ROOT" \
+  --prompt-file "$PROMPT")
 
-  JOB_ID=$("$JOB_BIN" \
-    --tier "$TIER" \
-    --mode review \
-    --name "${PANEL_ID}-${NAME_L}" \
-    --repo-root "$REPO_ROOT" \
-    --prompt-file "$PROMPT")
-
-  ENTRIES+=("\"${NAME_L}\": {\"runner\": \"${RUNNER}\", \"tier\": \"${TIER}\", \"job_id\": \"${JOB_ID}\"}")
-done
-
-# Assemble manifest.json.
-JOIN=$(IFS=','; echo "${ENTRIES[*]}")
 cat > "$PANEL_DIR/manifest.json" <<EOF
 {
   "panel_id": "$PANEL_ID",
@@ -187,7 +174,10 @@ cat > "$PANEL_DIR/manifest.json" <<EOF
   "scope_label": "$SCOPE_LABEL",
   "repo_root": "$REPO_ROOT",
   "started_at": "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)",
-  "lenses": { $JOIN }
+  "reviewers": {
+    "claude": {"runner": "claude", "tier": "strongest", "job_id": "$CLAUDE_JOB_ID"},
+    "codex":  {"runner": "codex",  "tier": "strongest", "job_id": "$CODEX_JOB_ID"}
+  }
 }
 EOF
 
