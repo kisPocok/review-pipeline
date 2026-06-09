@@ -26,13 +26,18 @@
       "minItems": 0,
       "items": {
         "type": "object",
-        "required": ["finding_id", "outcome", "reason"],
+        "required": ["finding_id", "severity", "outcome", "reason"],
         "additionalProperties": false,
         "properties": {
           "finding_id": {
             "type": "string",
             "pattern": "^F[0-9]{3,}$",
             "description": "Stable id the main agent assigns to each distinct finding while reconciling the two reviewer reports (e.g. F001)."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"],
+            "description": "Severity of the finding, taken from the reviewer report that raised it (the ## Critical|High|Medium|Low header it appeared under). When the two reviewers disagree, use the higher. Recorded here so the convergence gate and the MAX_ROUNDS table read from this file instead of re-parsing every report."
           },
           "outcome": {
             "type": "string",

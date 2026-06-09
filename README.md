@@ -33,6 +33,31 @@ Idempotent; re-run any time to add another project.
 
 **Auth:** `codex-job` uses `~/.codex/` (API-billed). `claude-job` strips `ANTHROPIC_API_KEY` to force subscription auth (free, shares rate limits with main session).
 
+## Autonomous runs (permissions)
+
+Clearing the hook runs `preflight`, the panel scripts, `jq`, and `git`, and reads/writes under `~/.orchestra` and `/tmp`. To run the loop without a permission prompt at each step, add these to the **same settings file you registered the hook in** — global `~/.claude/settings.json`, or `<project>/.claude/settings.local.json` when installed with `--project`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.claude/skills/review-pipeline/panel/preflight)",
+      "Bash(~/.claude/skills/review-pipeline/panel/review-panel:*)",
+      "Bash(~/.claude/skills/review-pipeline/panel/wait-panel:*)",
+      "Bash(~/.claude/skills/review-pipeline/panel/write-marker:*)",
+      "Bash(jq:*)",
+      "Read(~/.orchestra/**)",
+      "Write(~/.orchestra/**)",
+      "Write(/tmp/review-pipeline-packet-*.md)"
+    ]
+  }
+}
+```
+
+`preflight` takes **no arguments**, so list it as an exact match. A trailing-glob pattern (`… /preflight *`) requires an argument and silently fails to match the bare call — the result is a prompt on the skill's mandatory first action, every run.
+
+The pipeline also runs `git` (`diff`, `add`, `status`, `write-tree`, `commit`). Allow these to taste: `Bash(git:*)` is simplest, or scope to those subcommands if you'd rather not auto-allow destructive git in the repo. (A wrapper that auto-allows rewritten git — e.g. rtk — can cover these without an explicit entry.)
+
 ## Layout
 
 ```

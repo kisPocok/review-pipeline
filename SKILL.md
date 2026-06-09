@@ -5,13 +5,28 @@ description: Use when the user asks for a code review, or when the pre-commit / 
 
 # review-pipeline
 
-A two-reviewer commit-time review. The Go hook at `~/.claude/skills/review-pipeline/hook/bin/pre-commit-check` is registered as a `PreToolUse` on `Bash` and **blocks every real `git commit`** until a marker file exists at `~/.orchestra/markers/<git-write-tree>`. Your job when blocked: classify the diff, run the review pipeline if non-trivial, fix what's valid, write the marker for the final post-fix tree, retry the commit.
+A two-reviewer commit-time review. The Go hook at `~/.claude/skills/review-pipeline/hook/bin/pre-commit-check` is registered as a `PreToolUse` on `Bash` and **blocks every real `git commit`** until a marker file exists at `~/.orchestra/markers/<git-write-tree>`. Your job when blocked: run the pre-flight warm-up, classify the diff, run the review pipeline if non-trivial, fix what's valid, write the marker for the final post-fix tree, retry the commit.
+
+## At a glance
+
+A map of the flow — **orientation only, not an action list.** Your first *action* is the pre-flight warm-up immediately below.
+
+1. **Pre-flight warm-up** — always, before anything else.
+2. **Classify** the staged diff — trivial or non-trivial?
+   - **Trivial** → write the marker, retry the commit. Done.
+   - **Non-trivial** → run the review loop:
+     1. Write the shared packet (once per cycle).
+     2. Fire the panel — round 1 `--scope staged`; round 2+ `--scope tree:<previous round's pre-fix tree>`.
+     3. Wait for both reviewers; validate each `final.md`.
+     4. Reconcile both reviews; assign a disposition to every finding.
+     5. Nothing to fix → write the marker, retry the commit. **Done.** Otherwise apply fixes, capture the round's pre-fix tree as the next baseline, then re-stage.
+     6. Round < 3 → loop to step 2. Round == 3 → surface the severity table and ask the user.
 
 ## ⛔ FIRST ACTION — Pre-flight permission warm-up (DO NOT SKIP)
 
 🛑 **STOP. This is the first thing you do when this skill is invoked.** Before reading the rest of this file, before looking at `git diff`, before classifying anything — run the block below. It surfaces every permission prompt the pipeline will trigger, upfront, in one shot. **Skip this and the async pipeline stalls mid-run waiting for approval the agent firing it cannot give**, silently — you will not get a useful error, just a hang.
 
-This is not optional setup. This is not "if you have time". This is the first action. Run the command, confirm it prints `pre-flight OK`, then continue to "How this skill is triggered".
+This is not optional setup. This is not "if you have time". This is the first action. Run the command, confirm it prints `pre-flight OK`, then continue to Step 1 (classify the diff).
 
 ```bash
 ~/.claude/skills/review-pipeline/panel/preflight
@@ -73,22 +88,22 @@ Mandatory sections (write `None — <one-sentence reason>` if a section is genui
 
 Save to `/tmp/review-pipeline-packet-<slug>.md`. **Never inline this as a heredoc** — always pass via `--packet <path>`.
 
-### 2B.1.5 — Cycle concept (read before firing the panel)
+### 2B.2 — Cycle concept (read before firing the panel)
 
-A "cycle" is the sequence of rounds (panel → fix → panel → fix → ...) needed to clear one staged diff. Each round is its own panel-id, but they share a baseline:
+A "cycle" is the sequence of rounds (panel → fix → panel → fix → ...) needed to clear one staged diff. Each round is its own panel-id. The review surface shrinks each round because the baseline advances:
 
 - **Round 1** reviews the full diff (`--scope staged`, the default). This is the *original* feature being reviewed.
-- **Round 2+** reviews **only the fix delta** since the previous round — `--scope tree:<post-fix-tree-from-round-N-1>`. This prevents already-reviewed code from being re-flagged on every round.
+- **Round 2+** reviews **only the previous round's fix delta** — `--scope tree:<the tree round N-1 reviewed>`. The baseline is the staged tree as it stood when the previous round *fired*, **before** that round's fixes were staged. The diff is then exactly the fixes that round applied, so already-reviewed code is not re-flagged.
 
 You will need to track in-session, per cycle:
 
 - An array of panel-ids, one per round, in order
-- The post-fix tree hash captured at the end of each round (used as the baseline for the next round)
+- The **pre-fix** tree hash of each round — captured in 2B.10 *before* `git add -u`. The next round uses it as its `--scope tree:` baseline. (Capturing the post-fix tree instead is the off-by-one that yields an empty round-2 diff.)
 - For each panel-id, the path to its `dispositions.json` (written by you in 2B.7)
 
 Use your TodoList (or scratch notes — the harness allows it) to hold this. There is no persistent cycle state file; the data is derivable from `~/.orchestra/panels/<panel-id>/` for any panel-id you remember.
 
-### 2B.2 — Fire the panel
+### 2B.3 — Fire the panel
 
 **Round 1** (the first panel of the cycle — reviews the full staged diff):
 
@@ -100,23 +115,23 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --name <short-slug>-r1)
 ```
 
-**Round 2+** (reviews only the fix delta against the previous round's post-fix tree):
+**Round 2+** (reviews only the previous round's fix delta):
 
 ```bash
 PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --repo-root <effective_cwd> \
-  --scope "tree:$POST_FIX_TREE" \
+  --scope "tree:$BASELINE_TREE" \
   --packet /tmp/review-pipeline-packet-<slug>.md \
   --name <short-slug>-r<N>)
 ```
 
-Where `$POST_FIX_TREE` is the tree hash captured at the end of the previous round (see 2B.9). The diff the reviewers see is `<post-fix-tree>..<current-write-tree>` — the fixes you applied to address the previous round's findings, plus any incidental staged changes since.
+Where `$BASELINE_TREE` is the **pre-fix** tree of the previous round, captured in 2B.10 before its fixes were staged. `review-panel` diffs `<BASELINE_TREE>..<current-write-tree>`; since the index now carries the previous round's fixes, that diff is exactly those fixes (plus any incidental staged changes since).
 
 `review-panel` fires both reviewers (one `claude-job`, one `codex-job`) in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` under a `reviewers` object (`claude`, `codex`), each with its job-id. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
 
-**Why frozen baseline on round 2+:** if round N re-reviewed the full `--cached` diff, the reviewers would re-flag every line of the original feature plus the fixes you applied — including new tests, helper functions, and guards added in response to round-N-1 findings. That's the runaway-iteration dynamic. By scoping to the fix delta, the per-round review surface shrinks instead of growing.
+**Why advance the baseline each round (not re-review `--cached`):** if round N re-reviewed the full `--cached` diff, the reviewers would re-flag every line of the original feature plus the fixes you applied — including new tests, helper functions, and guards added in response to round-N-1 findings. That's the runaway-iteration dynamic. By scoping to the previous round's fix delta, the per-round review surface shrinks instead of growing.
 
-### 2B.3 — Wait for the panel and validate
+### 2B.4 — Wait for the panel and validate
 
 One command polls for both reviewer `exit_code` files and validates each `final.md`:
 
@@ -141,7 +156,7 @@ Read both reviewers' `final.md` directly (paths from the manifest: `~/.orchestra
 
 ### 2B.6 — Decide a disposition for every finding
 
-For each distinct finding across the two reviews, assign a stable id (F001, F002, …) and decide exactly one outcome:
+For each distinct finding across the two reviews, assign a stable id (F001, F002, …), note its severity (from the `## Critical|High|Medium|Low` header it appeared under; if the two reviewers disagree, take the higher), and decide exactly one outcome:
 
 | Outcome | When to use |
 |---|---|
@@ -151,7 +166,7 @@ For each distinct finding across the two reviews, assign a stable id (F001, F002
 
 **Solve all valid issues.** A finding that is valid and in-scope for this change MUST be fixed (`outcome: fixed`). The only non-fix outcomes are `acknowledged` (the finding is real but unrelated/out-of-scope to this change) and `false_positive` (the code contradicts it). Effort, severity, or "low gain" are never reasons to skip a valid in-scope finding.
 
-### 2B.6.5 — Write the disposition file
+### 2B.7 — Write the disposition file
 
 Build and write `~/.orchestra/panels/$PANEL_ID/dispositions.json` matching `triage/disposition-schema.json`:
 
@@ -161,45 +176,70 @@ Build and write `~/.orchestra/panels/$PANEL_ID/dispositions.json` matching `tria
   "round": <1-indexed>,
   "findings_path": "<~/.orchestra/panels/<panel-id>/ — the panel dir whose two reviews this covers>",
   "dispositions": [
-    {"finding_id": "F001", "outcome": "fixed", "reason": "applied input length cap in <file>:<line>"},
-    {"finding_id": "F002", "outcome": "acknowledged", "reason": "pre-existing, unrelated to this change; tracked in docs/sso/SECURITY-NOTES.md"},
-    {"finding_id": "F003", "outcome": "false_positive", "reason": "guard already exists at routes.go:18; verified."}
+    {"finding_id": "F001", "severity": "high", "outcome": "fixed", "reason": "applied input length cap in <file>:<line>"},
+    {"finding_id": "F002", "severity": "medium", "outcome": "acknowledged", "reason": "pre-existing, unrelated to this change; tracked in docs/sso/SECURITY-NOTES.md"},
+    {"finding_id": "F003", "severity": "low", "outcome": "false_positive", "reason": "guard already exists at routes.go:18; verified."}
   ]
 }
 ```
 
 Write the file before applying fixes (your decisions are made; the file records them). If you change your mind mid-fix (e.g., a `fixed` finding turns out to need a redesign), update the file to `acknowledged` with a reason before refiring the next round.
 
-Validate the file is well-formed JSON:
+Validate the file — not just well-formed JSON, but that every disposition carries the schema's required fields. A missing `severity` would pass a bare `jq empty` and then crash the 2B.11 table (`null` can't be a jq object key):
+
+An empty `dispositions: []` is legitimate (a round where both reviewers returned `No findings.`) — the check below accepts it (`[] | all(...)` is `true` in jq) and only rejects entries that are actually malformed. It exits non-zero on failure so the failure is a real signal, not a buried stderr line:
 
 ```bash
-jq empty ~/.orchestra/panels/$PANEL_ID/dispositions.json && echo "dispositions OK"
+if jq -e '(.dispositions | type == "array") and (.dispositions | all(
+  (.finding_id | test("^F[0-9]{3,}$"))
+  and (.severity | IN("critical","high","medium","low"))
+  and (.outcome  | IN("fixed","acknowledged","false_positive"))
+  and (.reason   | (type == "string") and (length > 0))
+))' ~/.orchestra/panels/$PANEL_ID/dispositions.json >/dev/null; then
+  echo "dispositions OK"
+else
+  echo "dispositions INVALID — every entry needs finding_id, severity, outcome, reason" >&2
+  exit 1
+fi
 ```
 
-### 2B.7 — Decide whether to continue
+### 2B.8 — Decide whether to continue
 
 Count outcomes from the disposition file you just wrote:
+
+```bash
+jq -r '.dispositions | group_by(.outcome) | map("\(.[0].outcome): \(length)") | .[]' \
+  ~/.orchestra/panels/$PANEL_ID/dispositions.json
+```
 
 - `fixed_count` — findings you will apply code changes for this round.
 - `acknowledged_count` — findings you accepted as out-of-scope risk.
 - `false_positive_count` — findings you dismissed.
 
-**Terminal cases:**
-
-- If `fixed_count == 0` → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
+**Nothing to fix (`fixed_count == 0`)** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
 
 **Convergence gate (LOW-only):**
 
-- If `fixed_count > 0` but every `outcome: fixed` finding has severity `low` across the two reviewer reports (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Use `AskUserQuestion` with three options:
+- If `fixed_count > 0` but every `outcome: fixed` finding has `severity: low` (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Check it straight from the disposition file:
+
+```bash
+jq -r '[.dispositions[] | select(.outcome == "fixed") | .severity] as $s
+  | if ($s | length) == 0 then "no fixes"
+    elif ($s | all(. == "low")) then "LOW-only — surface to user"
+    else "has critical/high/medium — proceed to fix" end' \
+  ~/.orchestra/panels/$PANEL_ID/dispositions.json
+```
+
+When it reports LOW-only, use `AskUserQuestion` with three options:
   1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
   2. **Fix and ship.** Apply the LOW fixes this round, but write the marker after this round without refiring another panel. No round N+1.
   3. **Fix and continue.** Apply the LOWs and refire (standard loop). Only choose this if there's a concrete reason to expect new HIGHs hiding behind the LOW fixes.
 
   Surface the LOW finding titles in the question text so the user can judge.
 
-- Otherwise (HIGH/CRITICAL/MEDIUM remain to fix) → proceed to 2B.8 (apply fixes), then 2B.9 (re-stage and refire).
+- Otherwise (HIGH/CRITICAL/MEDIUM remain to fix) → proceed to 2B.9 (apply fixes), then 2B.10 (re-stage and refire).
 
-### 2B.8 — Apply fixes (in-session)
+### 2B.9 — Apply fixes (in-session)
 
 You apply the fixes yourself, using your own Edit/Write/Grep/Bash tools. No fixer subprocess.
 
@@ -209,22 +249,29 @@ You apply the fixes yourself, using your own Edit/Write/Grep/Bash tools. No fixe
 
 Process findings in severity order: critical → high → medium → low. Within a severity, file-group them to avoid multiple seeks to the same file.
 
-### 2B.9 — Re-stage, capture post-fix tree, and loop
+**Do not stage during this step.** Leave your edits in the working tree; staging happens once, in 2B.10. This keeps the index equal to the tree the round reviewed, so 2B.10's pre-fix `write-tree` captures the correct baseline. (If a fix creates a *new* file, note it — `git add -u` won't pick it up; you'll add it explicitly in 2B.10.)
+
+### 2B.10 — Capture the baseline, re-stage, and loop
+
+Capture the tree the panel just reviewed **before** staging this round's fixes — your fixes are still unstaged in the working tree, so `write-tree` here yields the round's pre-fix tree. That tree is the **next** round's baseline:
 
 ```bash
-git -C <effective_cwd> add -u
-POST_FIX_TREE=$(git -C <effective_cwd> write-tree)
-echo "round $ROUND post-fix tree: $POST_FIX_TREE"
+BASELINE_TREE=$(git -C <effective_cwd> write-tree)   # pre-fix: fixes not yet staged
+git -C <effective_cwd> add -u                        # stage modifications to tracked files
+git -C <effective_cwd> add <new-file>...             # plus any new files a fix created
+echo "round $ROUND baseline for next round: $BASELINE_TREE"
 ```
 
-Record `$POST_FIX_TREE` in your in-session cycle state alongside the panel-id. This is the baseline for round N+1's `--scope tree:$POST_FIX_TREE` (per 2B.2).
+Record `$BASELINE_TREE` in your in-session cycle state alongside the panel-id. Round N+1 fires with `--scope tree:$BASELINE_TREE` (per 2B.3); since the index now carries this round's fixes, that diff is exactly the fixes you just applied. (`git add -u` stages only tracked-file changes — explicitly `git add` any new file a fix created, or it escapes review.)
+
+> **Order matters.** Capturing *after* `git add -u` records the post-fix tree, which equals the next round's *current* tree — `git diff` would compare it against itself and report an empty review. Capture before staging.
 
 The pre-fix marker (if any) is irrelevant — the tree has changed. Round counter += 1.
 
-- **If round < MAX_ROUNDS (3)** → go back to step 2B.2 (fire round-N+1 panel with `--scope tree:$POST_FIX_TREE`).
+- **If round < MAX_ROUNDS (3)** → go back to step 2B.3 (fire round-N+1 panel with `--scope tree:$BASELINE_TREE`).
 - **If round == MAX_ROUNDS** → STOP. **Do not refire.** Surface to the user with a severity-trend table.
 
-### 2B.9.1 — MAX_ROUNDS severity surface
+### 2B.11 — MAX_ROUNDS severity surface
 
 When you hit MAX_ROUNDS, the user needs to choose: ship, defer, or explicitly override the cap. Give them the data to decide. Build a per-round severity-and-outcome table by walking each panel-id in your cycle state:
 
@@ -235,13 +282,14 @@ for panel_id in <your-list-of-panel-ids>; do
   fpath=~/.orchestra/panels/$panel_id/dispositions.json
   if [ ! -f "$fpath" ]; then continue; fi
   jq -r --arg pid "$panel_id" --argjson r "$ROUND" '
-    ([.dispositions[] | .outcome] | group_by(.) | map({(.[0]): length}) | add // {})
+    ([.dispositions[] | .outcome]  | group_by(.) | map({(.[0]): length}) | add // {})
+    + ([.dispositions[] | .severity] | group_by(.) | map({(.[0]): length}) | add // {})
     + {panel_id: $pid, round: $r}
   ' "$fpath"
 done
 ```
 
-(Adapt to your needs — the goal is to print a table, not run that exact pipeline. Severity counts come from the two reviewer reports for each round, since dispositions don't carry severity.)
+(Adapt to your needs — the goal is to print a table, not run that exact pipeline. Both the severity and the outcome counts come straight from each round's `dispositions.json` now that findings carry `severity`.)
 
 Surface a table like this in your response (the format is what matters; build it however):
 
@@ -262,13 +310,13 @@ Then ask the user with `AskUserQuestion`:
 1. **Ship with current fixes.** Round-3 fixes are applied; write the marker, retry the commit. The 14 LOWs aren't refired against. (Recommended when remaining is L-heavy.)
 2. **Acknowledge and ship.** Update round-3 dispositions to `acknowledged` for the items you don't want to fix, then write the marker.
 3. **Defer to a follow-up PR.** Stage your current fixes, commit; open a follow-up PR for the remaining findings.
-4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.8), capture the post-fix tree (per 2B.9), then refire one more round with `--scope tree:$POST_FIX_TREE` (per 2B.2). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
+4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.9), capture the baseline (per 2B.10), then refire one more round with `--scope tree:$BASELINE_TREE` (per 2B.3). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
 
 Include the list of `acknowledged` and `false_positive` dispositions across all rounds in your response so the user can audit the decisions.
 
 ## Async handling rules
 
-- **Always validate `final.md` not just `exit_code`.** Exit 0 with an empty `final.md` is a silent failure, not "no findings."
+- **Always validate `final.md`, not just `exit_code`.** Exit 0 with an empty `final.md` is a silent failure, not "no findings." On a non-zero `exit_code`, inspect `stderr.log` before doing anything else.
 - **Read job dirs by job-id, not "the latest dir".** Multiple panels can be running concurrently in the same session if you triggered them.
 - **Never write the marker on a partial panel.** Both reviewer jobs must have exit_code == 0 with valid `final.md` before any marker is touched.
 - **Never write a pre-fix marker for a post-fix tree (or vice versa).** Recompute `git write-tree` immediately before `touch`-ing the marker.
@@ -287,9 +335,6 @@ Include the list of `acknowledged` and `false_positive` dispositions across all 
 - ❌ **Generic packet.** "Just review this diff" → generic results. Fill in every section of the packet template.
 - ❌ **Fire and forget.** Always come back for the panel result before committing.
 - ❌ **Ignoring low/medium findings without recording a disposition.** Every valid finding gets an outcome in `dispositions.json` — `fixed`, `acknowledged`, or `false_positive`. Silently dropping a finding (no fix, no entry) is the anti-pattern. `acknowledged` with a defensible reason is a legitimate outcome; "I'm just going to skip this" is not.
-- ❌ **Treating a non-zero `exit_code` as "no findings — looks clean."** Inspect `stderr.log` first.
-- ❌ **Writing the marker on partial-panel completion.** Both reviewers must finish cleanly.
-- ❌ **Reusing a pre-fix tree hash as a post-fix marker.** Recompute `git write-tree` after `git add -u`.
 - ❌ **Inlining the packet as a heredoc.** Always write to a file and pass via --packet.
 - ❌ **Calling a non-trivial diff "trivial" to take the bypass.** The classification rule is "no semantic logic change." Multi-line edits, control-flow changes, new functions, schema/API changes, behavior changes are NEVER trivial regardless of line count.
 - ❌ **Bypassing the hook by wrapping the commit in a shell form the parser doesn't reach** (heredoc-to-bash, deeply nested subshells, `eval`). If you find yourself reaching for a wrapper to dodge the block, that's the signal to actually run the panel.
@@ -298,6 +343,7 @@ Include the list of `acknowledged` and `false_positive` dispositions across all 
 - ❌ **Cheating MAX_ROUNDS.** Three rounds is the cap. If you can't converge, surface to the user — don't keep firing panels.
 - ❌ **Chaining `git add` and `git commit` in the same Bash call.** The hook fires as `PreToolUse` and blocks the entire command — `git add` never runs either. Always issue them as separate Bash tool calls: stage first, confirm with `git diff --cached --stat`, then commit.
 - ❌ **Using `ScheduleWakeup` to wait for panel jobs.** These are background tasks — the harness notifies you automatically when they complete. `ScheduleWakeup` is for `/loop dynamic` mode only. Never fire it inside a review-pipeline run.
-- ❌ **Round 2+ with `--scope staged`.** Defeats the frozen baseline. Round 1 reviews the full diff; every subsequent round MUST use `--scope tree:<previous-post-fix-tree>` so the review surface shrinks each round instead of growing. The growing-surface failure mode is what caused the NA-1058 10-round loop.
+- ❌ **Round 2+ with `--scope staged`.** Defeats the shrinking baseline. Round 1 reviews the full diff; every subsequent round MUST use `--scope tree:<previous round's pre-fix tree>` so the review surface shrinks each round instead of growing. The growing-surface failure mode is what caused the NA-1058 10-round loop.
+- ❌ **Using the post-fix tree as the next round's baseline.** Capture `$BASELINE_TREE` in 2B.10 *before* `git add -u`. The post-fix tree equals the next round's current tree, so `git diff` compares it against itself and `review-panel` exits with an empty-diff error.
 - ❌ **Refiring at MAX_ROUNDS without surfacing the severity table.** The user cannot make an informed continue/stop decision without per-round H/M/L counts and fixed/ack/fp breakdown. Build the table first, then ask.
 - ❌ **Using `acknowledged` as a synonym for "I don't feel like fixing this".** The `reason` must be defensible to a reviewer. Out-of-scope, deferred to a tracked follow-up, or spec-mandated are valid. "Low impact" without justification is not.
