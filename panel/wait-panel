@@ -11,7 +11,8 @@
 #   - final.md contains a severity header OR the "No findings." sentinel
 #
 # Prints one stderr line per state change while waiting and a final summary
-# table to stdout. Exits:
+# table to stdout. On success (exit 0), also prints a "reviews ready — …" block
+# with one "<reviewer> <path-to-final.md>" line per reviewer. Exits:
 #   0 — both reviewer jobs passed validation
 #   1 — at least one reviewer failed (non-zero exit, empty final.md, or invalid)
 #   2 — bad usage / missing manifest
@@ -54,11 +55,13 @@ done
 
 # Validate.
 FAIL=0
+FINAL_PATHS=()
 printf "%-22s %-7s %-12s %-12s %s\n" "reviewer" "exit" "final.md" "verdict" "notes"
 for reviewer in "${REVIEWERS[@]}"; do
   jid=$(jq -r ".reviewers.$reviewer.job_id" "$MANIFEST")
   runner=$(jq -r ".reviewers.$reviewer.runner" "$MANIFEST")
   dir="$HOME/.orchestra/jobs/$runner/$jid"
+  FINAL_PATHS+=("$reviewer $dir/final.md")
   ec=$(cat "$dir/exit_code" 2>/dev/null || echo "?")
   size=$(wc -c < "$dir/final.md" 2>/dev/null || echo 0)
   size=$(echo "$size" | tr -d ' ')
@@ -74,5 +77,13 @@ for reviewer in "${REVIEWERS[@]}"; do
   fi
   printf "%-22s %-7s %-12s %-12s %s\n" "$reviewer" "$ec" "${size}B" "$verdict" "$note"
 done
+
+if [[ "$FAIL" -eq 0 ]]; then
+  echo ""
+  echo "reviews ready — read each with the Read tool:"
+  for entry in "${FINAL_PATHS[@]}"; do
+    echo "  $entry"
+  done
+fi
 
 exit "$FAIL"

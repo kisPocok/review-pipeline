@@ -85,10 +85,18 @@ grep -q 'main.go' "$PROMPT_FILE" && ok "prompt carries the diff" \
   || fail "prompt missing diff"
 
 # Assertion 4: wait-panel validates both reviewers and exits 0.
-if "$WAIT_PANEL" "$PANEL_ID" >/dev/null 2>&1; then
+if OUT=$("$WAIT_PANEL" "$PANEL_ID" 2>/dev/null); then
   ok "wait-panel exit 0 (both reviewers valid)"
 else
   fail "wait-panel non-zero on valid panel"
+fi
+
+# Assertion 5: on success wait-panel prints both reviewers' final.md paths —
+# the contract SKILL.md 2B.5 depends on to avoid the simple_expansion prompt.
+if grep -q '^  claude .*/final\.md$' <<<"$OUT" && grep -q '^  codex .*/final\.md$' <<<"$OUT"; then
+  ok "wait-panel prints both final.md paths on success"
+else
+  fail "wait-panel missing reviews-ready paths block"
 fi
 
 rm -rf "$WORK"

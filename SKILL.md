@@ -143,12 +143,17 @@ Behavior:
 - Polls every 2s, logging only on state change (so stderr stays ~7 lines total regardless of total wait time).
 - Validates: `exit_code` is `0`, `final.md` non-empty, and contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel.
 - Exits `0` only if both reviewers pass. Non-zero exit → surface the summary table to the user; do **not** proceed to reconciliation.
+- On success, prints the two `final.md` paths (one per reviewer) as the last stdout lines — use those in 2B.5.
 
 **If you have parallel work to do** (drafting the PR description, planning the next step), start that work after firing the panel. You'll be notified automatically when the background task completes — do NOT fire `ScheduleWakeup` for this.
 
 ### 2B.5 — Read and reconcile both reviews
 
-Read both reviewers' `final.md` directly (paths from the manifest: `~/.orchestra/jobs/claude/<id>/final.md` and `~/.orchestra/jobs/codex/<id>/final.md`). You reconcile them yourself — no automated reconciliation step:
+`wait-panel` (2B.4) already printed the two `final.md` paths on success. **Open each one with the Read tool** (not Bash) — they live under `~/.orchestra/`, which `Read(~/.orchestra/**)` allows, so neither prompts.
+
+> ⛔ Do **not** resolve the paths yourself with a shell pipeline like `CJ=$(jq … manifest.json); cat …/$CJ/final.md`. Command substitution (`$(…)`) and variable expansion (`$CJ`) trip Claude Code's `simple_expansion` analyzer, forcing a permission prompt that **no `allow` entry can suppress** — the dynamic command can't be statically matched. The paths from `wait-panel` are literal; just Read them.
+
+You reconcile the two reviews yourself — no automated reconciliation step:
 
 - Treat findings that name the same file+location and the same defect as one. Keep the clearer write-up.
 - A finding raised by only one reviewer is still a finding — single-reviewer coverage does not lower its weight.
@@ -336,6 +341,7 @@ Include the list of `acknowledged` and `false_positive` dispositions across all 
 - ❌ **Fire and forget.** Always come back for the panel result before committing.
 - ❌ **Ignoring low/medium findings without recording a disposition.** Every valid finding gets an outcome in `dispositions.json` — `fixed`, `acknowledged`, or `false_positive`. Silently dropping a finding (no fix, no entry) is the anti-pattern. `acknowledged` with a defensible reason is a legitimate outcome; "I'm just going to skip this" is not.
 - ❌ **Inlining the packet as a heredoc.** Always write to a file and pass via --packet.
+- ❌ **Reading the reviews via a shell pipeline with command substitution.** `CJ=$(jq … manifest.json); cat …/$CJ/final.md` trips the `simple_expansion` analyzer and prompts on every run — and no `allow` entry can suppress it, because the command is dynamic. `wait-panel` already prints the two literal `final.md` paths on success; just **Read** them (2B.5).
 - ❌ **Calling a non-trivial diff "trivial" to take the bypass.** The classification rule is "no semantic logic change." Multi-line edits, control-flow changes, new functions, schema/API changes, behavior changes are NEVER trivial regardless of line count.
 - ❌ **Bypassing the hook by wrapping the commit in a shell form the parser doesn't reach** (heredoc-to-bash, deeply nested subshells, `eval`). If you find yourself reaching for a wrapper to dodge the block, that's the signal to actually run the panel.
 - ❌ **Skipping classification in autonomous mode.** Trivial diffs still get the bypass; the autonomous distinction only changes whether you ASK the user about non-trivial panels — it doesn't promote trivial diffs into reviewable ones.
