@@ -221,7 +221,18 @@ jq -r '.dispositions | group_by(.outcome) | map("\(.[0].outcome): \(length)") | 
 - `acknowledged_count` — findings you accepted as out-of-scope risk.
 - `false_positive_count` — findings you dismissed.
 
-**Nothing to fix (`fixed_count == 0`)** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
+**Unfixed critical/high gate (check FIRST, before any marker):** a critical or high finding you decided *not* to fix — `acknowledged` or `false_positive` — needs the user's sign-off. You may be right, but you are also the author of the change being reviewed; the user audits that call before it ships silently:
+
+```bash
+jq -r '[.dispositions[] | select(.outcome != "fixed" and (.severity | IN("critical","high")))]
+  | if length == 0 then "no unfixed critical/high — proceed"
+    else "GATE: \(length) unfixed critical/high — ask the user" end' \
+  ~/.orchestra/panels/$PANEL_ID/dispositions.json
+```
+
+When gated, surface each such finding (id, severity, outcome, your reason) via `AskUserQuestion` with options per finding-set: **Accept and ship** (keep the disposition, proceed), **Fix this round** (flip to `fixed`, proceed to 2B.9), or **Defer to a tracked follow-up** (keep `acknowledged`, add the tracker reference to `reason`). Only continue past this gate with the user's answer. Low/medium non-fix dispositions do not gate — the dispositions file records them for audit.
+
+**Nothing to fix (`fixed_count == 0`, gate passed)** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
 
 **Convergence gate (LOW-only):**
 
@@ -349,3 +360,4 @@ Include the list of `acknowledged` and `false_positive` dispositions across all 
 - ❌ **Recomputing the next round's baseline with `git write-tree` yourself.** By the time fixes are staged, `write-tree` yields the post-fix tree — the next round would diff it against itself and `review-panel` exits with an empty-diff error. Always use the `next baseline: tree:<hash>` line wait-panel printed.
 - ❌ **Refiring at MAX_ROUNDS without surfacing the severity table.** The user cannot make an informed continue/stop decision without per-round H/M/L counts and fixed/ack/fp breakdown. Build the table first, then ask.
 - ❌ **Using `acknowledged` as a synonym for "I don't feel like fixing this".** The `reason` must be defensible to a reviewer. Out-of-scope, deferred to a tracked follow-up, or spec-mandated are valid. "Low impact" without justification is not.
+- ❌ **Writing the marker while a critical/high finding sits at `acknowledged` or `false_positive` without user sign-off.** `fixed_count == 0` is not "done" — run the unfixed critical/high gate in 2B.8 first. Dismissing a CRITICAL is a user-visible decision, never a silent one.
