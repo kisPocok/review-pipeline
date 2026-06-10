@@ -108,6 +108,17 @@ func TestAnalyze_ExpansionFailsClosed(t *testing.T) {
 		{"cmdsubst subcommand", "git $(echo commit) -m x"},
 		{"expansion before literal subcommand", "git $FLAGS commit -m x"},
 		{"quoted expansion subcommand", `git "$C" -m x`},
+		// Unquoted expansions word-split at runtime, so they can shift a
+		// hidden commit into subcommand position even past a literal word.
+		{"unquoted expansion in option value", "git -c color.ui=$COLOR status"},
+		// Quoted array-style expansions stay quoted but still yield one argv
+		// word per element — CFG=(color.ui=x commit) shifts a hidden commit
+		// into subcommand position.
+		{"quoted array expansion in option value", `git -c "${CFG[@]}" status`},
+		{"quoted positional expansion in option value", `git -c "$@" status`},
+		// Indirection can alias an [@] expansion (x='a[@]'), unresolvable
+		// statically.
+		{"quoted indirect expansion in option value", `git -c "${!CFG}" status`},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +136,14 @@ func TestAnalyze_ExpansionFailsClosed(t *testing.T) {
 		{"expansion after non-commit subcommand", "git log $REF"},
 		{"expansion in commit-msg value still normal detection", "git status $X"},
 		{"non-git command with expansions", "echo $C"},
+		// Quoted expansions always stay a single word, so a literal
+		// non-commit subcommand keeps its position — no reason to block.
+		{"quoted expansion in -C value, literal status", `git -C "$REPO" status`},
+		{"quoted expansion in -c value, literal status", `git -c "color.ui=$COLOR" status`},
+		// Quoted scalar subscripts select one element ([*] joins) — only a
+		// literal [@] subscript splits in quoted context.
+		{"quoted indexed subscript, literal status", `git -c "${CFG[0]}" status`},
+		{"quoted star subscript, literal status", `git -c "${CFG[*]}" status`},
 	}
 	for _, tt := range allowed {
 		t.Run(tt.name, func(t *testing.T) {

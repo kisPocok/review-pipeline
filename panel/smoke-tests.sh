@@ -188,15 +188,18 @@ PANEL_ID3=$(
 )
 DEAD_JID=$(jq -r '.reviewers.codex.job_id' "$HOME/.orchestra/panels/$PANEL_ID3/manifest.json")
 rm -f "$HOME/.orchestra/jobs/codex/$DEAD_JID/exit_code"
-TIMEOUT_BIN=$(command -v gtimeout || command -v timeout)
-if WAIT_PANEL_TIMEOUT_SECS=2 "$TIMEOUT_BIN" 15 "$WAIT_PANEL" "$PANEL_ID3" >/dev/null 2>&1; then
-  fail "wait-panel exit 0 despite missing exit_code"
+TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+if [[ -z "$TIMEOUT_BIN" ]]; then
+  fail "no gtimeout/timeout on PATH — cannot run dead-job deadline test"
 else
+  WAIT_PANEL_TIMEOUT_SECS=2 "$TIMEOUT_BIN" 15 "$WAIT_PANEL" "$PANEL_ID3" >/dev/null 2>&1
   rc=$?
-  if [[ "$rc" == "124" ]]; then
+  if [[ "$rc" == "1" ]]; then
+    ok "wait-panel deadlines and exits non-zero on a dead job"
+  elif [[ "$rc" == "124" ]]; then
     fail "wait-panel hung past its deadline (killed by test timeout)"
   else
-    ok "wait-panel deadlines and exits non-zero on a dead job"
+    fail "wait-panel exit $rc on a dead job (want 1)"
   fi
 fi
 

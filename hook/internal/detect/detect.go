@@ -140,7 +140,7 @@ func analyze(cmd, baseCwd string, depth int) Result {
 		// Expansions ($VAR, $(…)) resolve to empty text in wordsToStrings, so
 		// a subcommand hidden behind one is invisible to the checks below.
 		// Like the maxRecursion case, that uncertainty fails closed.
-		if expansionBeforeSubcommand(call.Args, wordOffset, subIdx) {
+		if expansionHidesSubcommand(call.Args, wordOffset, subIdx) {
 			return Result{IsGitCommit: true, EffectiveCwd: cwd}
 		}
 		if subIdx >= len(args) || args[subIdx] != "commit" {
@@ -452,12 +452,53 @@ func wordsToStrings(words []*syntax.Word) []string {
 	return out
 }
 
-// expansionBeforeSubcommand reports whether any git arg from position 1 up to
-// and including the subcommand position contains an unresolvable expansion.
+// expansionHidesSubcommand reports whether shell expansions make the git
+// subcommand unknowable: the word at the subcommand position contains any
+// expansion (its value could be "commit"), or an earlier arg carries an
+// expansion that can yield multiple argv words and shift a hidden commit
+// into subcommand position. Quoted scalar expansions before a literal
+// subcommand are safe — they always remain a single word.
 // offset maps stripped-arg positions back into words (see stripTransparent).
-func expansionBeforeSubcommand(words []*syntax.Word, offset, subIdx int) bool {
-	for i := 1; i <= subIdx && offset+i < len(words); i++ {
-		if wordHasExpansion(words[offset+i]) {
+func expansionHidesSubcommand(words []*syntax.Word, offset, subIdx int) bool {
+	if i := offset + subIdx; i < len(words) && wordHasExpansion(words[i]) {
+		return true
+	}
+	for i := 1; i < subIdx && offset+i < len(words); i++ {
+		if wordHasSplittingExpansion(words[offset+i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordHasSplittingExpansion reports whether w contains an expansion that can
+// yield more than one argv word: any unquoted expansion (IFS splitting), or a
+// quoted expansion that splits despite the quotes — "$@" and a literal [@]
+// subscript ("${arr[@]}") expand to one word per element, and indirection
+// (${!x}) can alias an [@] form, unresolvable statically. Quoted scalar
+// expansions ("$VAR", "${arr[0]}", "${arr[*]}", "$(cmd)") always remain a
+// single word and are safe.
+func wordHasSplittingExpansion(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, p := range w.Parts {
+		switch x := p.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, pp := range x.Parts {
+				pe, ok := pp.(*syntax.ParamExp)
+				if !ok {
+					continue
+				}
+				if pe.Excl || pe.Param == nil || pe.Param.Value == "@" {
+					return true
+				}
+				if iw, ok := pe.Index.(*syntax.Word); ok && wordLit(iw) == "@" {
+					return true
+				}
+			}
+		default:
 			return true
 		}
 	}
