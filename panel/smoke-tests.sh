@@ -179,6 +179,27 @@ else
   fail "claude-job: empty final.md when stream lacks a result event"
 fi
 
+# Assertion 11: wait-panel must not hang forever when a job dies before
+# writing exit_code — it deadlines (WAIT_PANEL_TIMEOUT_SECS) and exits non-zero.
+PANEL_ID3=$(
+  REVIEW_PIPELINE_CODEX_JOB="$WORK/stub-codex" \
+  REVIEW_PIPELINE_CLAUDE_JOB="$WORK/stub-claude" \
+  "$REVIEW_PANEL" --repo-root "$REPO" --scope staged --packet "$PACKET" --name smoke-dead 2>/dev/null
+)
+DEAD_JID=$(jq -r '.reviewers.codex.job_id' "$HOME/.orchestra/panels/$PANEL_ID3/manifest.json")
+rm -f "$HOME/.orchestra/jobs/codex/$DEAD_JID/exit_code"
+TIMEOUT_BIN=$(command -v gtimeout || command -v timeout)
+if WAIT_PANEL_TIMEOUT_SECS=2 "$TIMEOUT_BIN" 15 "$WAIT_PANEL" "$PANEL_ID3" >/dev/null 2>&1; then
+  fail "wait-panel exit 0 despite missing exit_code"
+else
+  rc=$?
+  if [[ "$rc" == "124" ]]; then
+    fail "wait-panel hung past its deadline (killed by test timeout)"
+  else
+    ok "wait-panel deadlines and exits non-zero on a dead job"
+  fi
+fi
+
 rm -rf "$WORK"
 echo "════════════════════════════"
 printf 'summary: %d pass, %d fail\n' "$PASS" "$FAIL"

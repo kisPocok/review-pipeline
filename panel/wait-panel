@@ -4,8 +4,9 @@
 # Usage:
 #   wait-panel <panel-id>
 #
-# Reads $HOME/.orchestra/panels/<panel-id>/manifest.json and polls (every 2s)
-# for every reviewer job's exit_code file. Validates each reviewer:
+# Reads $HOME/.orchestra/panels/<panel-id>/manifest.json and polls (every 2s,
+# up to WAIT_PANEL_TIMEOUT_SECS, default 900) for every reviewer job's
+# exit_code file. Validates each reviewer:
 #   - exit_code is 0
 #   - final.md exists and size > 0
 #   - final.md contains a severity header OR the "No findings." sentinel
@@ -43,7 +44,11 @@ count_done() {
 }
 
 # Poll every 2s, logging only on state change so stderr stays compact
-# (~7 lines total regardless of total wait time).
+# (~7 lines total regardless of total wait time). Deadline guards against a
+# job whose subshell died before writing exit_code (kill, logout, crash) —
+# default 900s covers the 10-min review job timeout plus grace.
+TIMEOUT_SECS="${WAIT_PANEL_TIMEOUT_SECS:-900}"
+DEADLINE=$((SECONDS + TIMEOUT_SECS))
 LAST=-1
 while :; do
   DONE=$(count_done)
@@ -52,6 +57,10 @@ while :; do
     LAST=$DONE
   fi
   [[ "$DONE" -ge 2 ]] && break
+  if (( SECONDS >= DEADLINE )); then
+    echo "wait-panel: timed out after ${TIMEOUT_SECS}s — a reviewer job never wrote exit_code (died or still running); validating what landed" >&2
+    break
+  fi
   sleep 2
 done
 
@@ -70,7 +79,9 @@ for reviewer in "${REVIEWERS[@]}"; do
 
   verdict="ok"
   note=""
-  if [[ "$ec" != "0" ]]; then
+  if [[ "$ec" == "?" ]]; then
+    verdict="FAIL"; note="no exit_code — job died or timed out; see $dir/stderr.log"; FAIL=1
+  elif [[ "$ec" != "0" ]]; then
     verdict="FAIL"; note="non-zero exit; see $dir/stderr.log"; FAIL=1
   elif [[ "$size" -eq 0 ]]; then
     verdict="FAIL"; note="empty final.md"; FAIL=1
