@@ -141,8 +141,6 @@ fi
       2> "$JOB_DIR/stderr.log"
   fi
   rc=$?
-  echo "$rc" > "$JOB_DIR/exit_code"
-  date -Iseconds 2>/dev/null > "$JOB_DIR/done_at" || date +%Y-%m-%dT%H:%M:%S%z > "$JOB_DIR/done_at"
 
   # Extract final assistant text into final.md.
   if [[ -s "$JOB_DIR/events.jsonl" ]]; then
@@ -155,6 +153,11 @@ fi
   else
     : > "$JOB_DIR/final.md"
   fi
+
+  date -Iseconds 2>/dev/null > "$JOB_DIR/done_at" || date +%Y-%m-%dT%H:%M:%S%z > "$JOB_DIR/done_at"
+  # exit_code is the completion sentinel wait-panel polls on — write it last,
+  # after final.md, or a poller can observe a finished job with no review.
+  echo "$rc" > "$JOB_DIR/exit_code"
 ) >/dev/null 2>&1 &
 echo $! > "$JOB_DIR/pid"
 

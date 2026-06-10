@@ -117,6 +117,46 @@ else
   fail "wait-panel missing 'next baseline: tree:<hash>' line"
 fi
 
+# ── claude-job ──────────────────────────────────────────────────────────────
+CLAUDE_JOB="$SCRIPT_DIR/../jobs/claude-job"
+STUBBIN="$WORK/stubbin"
+mkdir -p "$STUBBIN"
+REAL_JQ=$(command -v jq)
+
+# Stub claude CLI: emits stream-json with narration, findings text, and a
+# terminal result event.
+cat > "$STUBBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Reading the diff to get oriented."}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"## Low\n\n### F1: nit"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","result":"## Low\n\n### F1: nit"}'
+EOF
+chmod +x "$STUBBIN/claude"
+
+# jq wrapper that delays only the events.jsonl extraction call, making any
+# exit_code-before-final.md ordering bug deterministic instead of a ms race.
+cat > "$STUBBIN/jq" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == *events.jsonl* ]] && sleep 1; done
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$STUBBIN/jq"
+
+JOB_ID=$(PATH="$STUBBIN:$PATH" "$CLAUDE_JOB" --tier light --mode review \
+  --prompt-file "$PACKET" --repo-root "$REPO" --name smoke 2>/dev/null)
+JOB_DIR="$HOME/.orchestra/jobs/claude/$JOB_ID"
+
+# Assertion 8: exit_code is the completion sentinel — final.md must already be
+# complete the instant exit_code appears (wait-panel polls on exit_code).
+deadline=$((SECONDS + 20))
+while [[ ! -f "$JOB_DIR/exit_code" && $SECONDS -lt $deadline ]]; do :; done
+if [[ -f "$JOB_DIR/exit_code" && -s "$JOB_DIR/final.md" ]]; then
+  ok "claude-job: final.md complete when exit_code appears"
+else
+  fail "claude-job: exit_code appeared before final.md (race), or job never finished"
+fi
+
 rm -rf "$WORK"
 echo "════════════════════════════"
 printf 'summary: %d pass, %d fail\n' "$PASS" "$FAIL"
