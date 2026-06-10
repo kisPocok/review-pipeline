@@ -95,6 +95,47 @@ func TestAnalyze_IsGitCommit_AllowCases(t *testing.T) {
 	}
 }
 
+// TestAnalyze_ExpansionFailsClosed: expansions resolve to empty text during
+// analysis, so a git subcommand hidden behind one is invisible. Like the
+// maxRecursion case, that uncertainty must block, not allow.
+func TestAnalyze_ExpansionFailsClosed(t *testing.T) {
+	blocked := []struct {
+		name string
+		cmd  string
+	}{
+		{"variable subcommand", "C=commit; git $C -m x"},
+		{"param-default subcommand", "git ${C:-commit} -m x"},
+		{"cmdsubst subcommand", "git $(echo commit) -m x"},
+		{"expansion before literal subcommand", "git $FLAGS commit -m x"},
+		{"quoted expansion subcommand", `git "$C" -m x`},
+	}
+	for _, tt := range blocked {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Analyze(tt.cmd, "/tmp")
+			if !got.IsGitCommit {
+				t.Errorf("Analyze(%q) IsGitCommit = false; want true (fail closed)", tt.cmd)
+			}
+		})
+	}
+
+	allowed := []struct {
+		name string
+		cmd  string
+	}{
+		{"expansion after non-commit subcommand", "git log $REF"},
+		{"expansion in commit-msg value still normal detection", "git status $X"},
+		{"non-git command with expansions", "echo $C"},
+	}
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Analyze(tt.cmd, "/tmp")
+			if got.IsGitCommit {
+				t.Errorf("Analyze(%q) IsGitCommit = true; want false", tt.cmd)
+			}
+		})
+	}
+}
+
 // TestAnalyze_EffectiveCwd checks that cwd is correctly resolved through `cd`
 // and `git -C` so that subsequent write-tree calls match the commit's view.
 func TestAnalyze_EffectiveCwd(t *testing.T) {

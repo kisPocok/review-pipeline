@@ -106,6 +106,9 @@ func analyze(cmd, baseCwd string, depth int) Result {
 		if len(args) == 0 {
 			continue
 		}
+		// Offset of args[0] within call.Args after stripTransparent trimmed
+		// the front, so positions map back to their syntax.Word.
+		wordOffset := len(call.Args) - len(args)
 
 		head := filepath.Base(args[0])
 
@@ -133,6 +136,12 @@ func analyze(cmd, baseCwd string, depth int) Result {
 		subIdx, hasInfo, gitC, globals := walkGitGlobals(args)
 		if hasInfo {
 			continue
+		}
+		// Expansions ($VAR, $(…)) resolve to empty text in wordsToStrings, so
+		// a subcommand hidden behind one is invisible to the checks below.
+		// Like the maxRecursion case, that uncertainty fails closed.
+		if expansionBeforeSubcommand(call.Args, wordOffset, subIdx) {
+			return Result{IsGitCommit: true, EffectiveCwd: cwd}
 		}
 		if subIdx >= len(args) || args[subIdx] != "commit" {
 			continue
@@ -441,6 +450,40 @@ func wordsToStrings(words []*syntax.Word) []string {
 		out = append(out, wordLit(w))
 	}
 	return out
+}
+
+// expansionBeforeSubcommand reports whether any git arg from position 1 up to
+// and including the subcommand position contains an unresolvable expansion.
+// offset maps stripped-arg positions back into words (see stripTransparent).
+func expansionBeforeSubcommand(words []*syntax.Word, offset, subIdx int) bool {
+	for i := 1; i <= subIdx && offset+i < len(words); i++ {
+		if wordHasExpansion(words[offset+i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordHasExpansion reports whether w contains any part that wordLit cannot
+// resolve to literal text (ParamExp, CmdSubst, ArithmExp, etc.).
+func wordHasExpansion(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, p := range w.Parts {
+		switch x := p.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, pp := range x.Parts {
+				if _, ok := pp.(*syntax.Lit); !ok {
+					return true
+				}
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // wordLit returns the literal content of a Word, treating quoted parts as
