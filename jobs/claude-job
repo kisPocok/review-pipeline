@@ -142,13 +142,16 @@ fi
   fi
   rc=$?
 
-  # Extract final assistant text into final.md.
+  # Extract the terminal result event into final.md; without one, fall back
+  # to concatenated assistant text (intermediate narration and all).
   if [[ -s "$JOB_DIR/events.jsonl" ]]; then
-    jq -r '
-      select(.type=="assistant")
-      | .message.content[]?
-      | select(.type=="text")
-      | .text
+    jq -rs '
+      ([.[] | select(.type=="result") | .result // empty] | last) as $r
+      | if $r != null and $r != "" then $r
+        else [.[] | select(.type=="assistant")
+              | .message.content[]? | select(.type=="text") | .text]
+             | join("\n")
+        end
     ' "$JOB_DIR/events.jsonl" > "$JOB_DIR/final.md" 2> "$JOB_DIR/extract.err" || true
   else
     : > "$JOB_DIR/final.md"

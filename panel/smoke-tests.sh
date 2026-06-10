@@ -130,7 +130,9 @@ cat > "$STUBBIN/claude" <<'EOF'
 cat >/dev/null
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Reading the diff to get oriented."}]}}'
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"## Low\n\n### F1: nit"}]}}'
-printf '%s\n' '{"type":"result","subtype":"success","result":"## Low\n\n### F1: nit"}'
+if [[ -z "${CLAUDE_STUB_NO_RESULT:-}" ]]; then
+  printf '%s\n' '{"type":"result","subtype":"success","result":"## Low\n\n### F1: nit"}'
+fi
 EOF
 chmod +x "$STUBBIN/claude"
 
@@ -155,6 +157,26 @@ if [[ -f "$JOB_DIR/exit_code" && -s "$JOB_DIR/final.md" ]]; then
   ok "claude-job: final.md complete when exit_code appears"
 else
   fail "claude-job: exit_code appeared before final.md (race), or job never finished"
+fi
+
+# Assertion 9: final.md is the terminal result event only — intermediate
+# assistant narration must not pollute the review.
+if grep -q 'F1: nit' "$JOB_DIR/final.md" && ! grep -q 'Reading the diff' "$JOB_DIR/final.md"; then
+  ok "claude-job: final.md carries result event, no narration"
+else
+  fail "claude-job: final.md polluted with narration or missing result text"
+fi
+
+# Assertion 10: with no result event in the stream, fall back to assistant text.
+JOB_ID2=$(PATH="$STUBBIN:$PATH" CLAUDE_STUB_NO_RESULT=1 "$CLAUDE_JOB" --tier light --mode review \
+  --prompt-file "$PACKET" --repo-root "$REPO" --name smoke-noresult 2>/dev/null)
+JOB_DIR2="$HOME/.orchestra/jobs/claude/$JOB_ID2"
+deadline=$((SECONDS + 20))
+while [[ ! -f "$JOB_DIR2/exit_code" && $SECONDS -lt $deadline ]]; do :; done
+if grep -q 'F1: nit' "$JOB_DIR2/final.md" 2>/dev/null; then
+  ok "claude-job: falls back to assistant text without result event"
+else
+  fail "claude-job: empty final.md when stream lacks a result event"
 fi
 
 rm -rf "$WORK"
