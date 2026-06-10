@@ -93,6 +93,10 @@ fi
 
 GIT_STATUS=$(git -C "$REPO_ROOT" status --short)
 
+# The tree under review at fire time (pre-fix). Round N+1 uses it as its
+# --scope tree: baseline; wait-panel surfaces it as the "next baseline" line.
+REVIEWED_TREE="${CURRENT_TREE:-$(git -C "$REPO_ROOT" write-tree)}"
+
 NAME=$(echo "$NAME" | tr -c '[:alnum:]-_' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')
 PANEL_ID="${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
 PANEL_DIR="$HOME/.orchestra/panels/$PANEL_ID"
@@ -172,6 +176,7 @@ cat > "$PANEL_DIR/manifest.json" <<EOF
   "panel_id": "$PANEL_ID",
   "scope": "$SCOPE",
   "scope_label": "$SCOPE_LABEL",
+  "reviewed_tree": "$REVIEWED_TREE",
   "repo_root": "$REPO_ROOT",
   "started_at": "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)",
   "reviewers": {

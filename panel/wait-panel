@@ -12,7 +12,9 @@
 #
 # Prints one stderr line per state change while waiting and a final summary
 # table to stdout. On success (exit 0), also prints a "reviews ready — …" block
-# with one "<reviewer> <path-to-final.md>" line per reviewer. Exits:
+# with one "<reviewer> <path-to-final.md>" line per reviewer, then a
+# "next baseline: tree:<hash>" line (the manifest's reviewed_tree — copy it
+# into the next round's --scope). Exits:
 #   0 — both reviewer jobs passed validation
 #   1 — at least one reviewer failed (non-zero exit, empty final.md, or invalid)
 #   2 — bad usage / missing manifest
@@ -84,6 +86,10 @@ if [[ "$FAIL" -eq 0 ]]; then
   for entry in "${FINAL_PATHS[@]}"; do
     echo "  $entry"
   done
+  REVIEWED_TREE=$(jq -r '.reviewed_tree // empty' "$MANIFEST")
+  if [[ -n "$REVIEWED_TREE" ]]; then
+    echo "next baseline: tree:$REVIEWED_TREE"
+  fi
 fi
 
 exit "$FAIL"

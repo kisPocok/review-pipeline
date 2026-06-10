@@ -99,6 +99,24 @@ else
   fail "wait-panel missing reviews-ready paths block"
 fi
 
+# Assertion 6: manifest records the tree the panel reviewed (the pre-fix tree
+# at fire time — the next round's baseline).
+EXPECTED_TREE=$(git -C "$REPO" write-tree)
+REVIEWED_TREE=$(jq -r '.reviewed_tree // empty' "$MANIFEST" 2>/dev/null)
+if [[ "$REVIEWED_TREE" == "$EXPECTED_TREE" ]]; then
+  ok "manifest records reviewed_tree"
+else
+  fail "manifest reviewed_tree='$REVIEWED_TREE' (want $EXPECTED_TREE)"
+fi
+
+# Assertion 7: on success wait-panel prints the literal next-round baseline —
+# SKILL.md 2B.3 copies this into round N+1's --scope, no write-tree capture.
+if grep -q "^next baseline: tree:$EXPECTED_TREE$" <<<"$OUT"; then
+  ok "wait-panel prints next baseline line"
+else
+  fail "wait-panel missing 'next baseline: tree:<hash>' line"
+fi
+
 rm -rf "$WORK"
 echo "════════════════════════════"
 printf 'summary: %d pass, %d fail\n' "$PASS" "$FAIL"

@@ -19,7 +19,7 @@ A map of the flow — **orientation only, not an action list.** Your first *acti
      2. Fire the panel — round 1 `--scope staged`; round 2+ `--scope tree:<previous round's pre-fix tree>`.
      3. Wait for both reviewers; validate each `final.md`.
      4. Reconcile both reviews; assign a disposition to every finding.
-     5. Nothing to fix → write the marker, retry the commit. **Done.** Otherwise apply fixes, capture the round's pre-fix tree as the next baseline, then re-stage.
+     5. Nothing to fix → write the marker, retry the commit. **Done.** Otherwise apply fixes and re-stage; the next round's baseline is the `next baseline:` line wait-panel printed.
      6. Round < 3 → loop to step 2. Round == 3 → surface the severity table and ask the user.
 
 ## ⛔ FIRST ACTION — Pre-flight permission warm-up (DO NOT SKIP)
@@ -93,12 +93,12 @@ Save to `/tmp/review-pipeline-packet-<slug>.md`. **Never inline this as a heredo
 A "cycle" is the sequence of rounds (panel → fix → panel → fix → ...) needed to clear one staged diff. Each round is its own panel-id. The review surface shrinks each round because the baseline advances:
 
 - **Round 1** reviews the full diff (`--scope staged`, the default). This is the *original* feature being reviewed.
-- **Round 2+** reviews **only the previous round's fix delta** — `--scope tree:<the tree round N-1 reviewed>`. The baseline is the staged tree as it stood when the previous round *fired*, **before** that round's fixes were staged. The diff is then exactly the fixes that round applied, so already-reviewed code is not re-flagged.
+- **Round 2+** reviews **only the previous round's fix delta** — `--scope tree:<the tree round N-1 reviewed>`. `review-panel` records the tree it reviewed in the manifest (`reviewed_tree`, captured at fire time — before any fixes), and `wait-panel` prints it as a literal `next baseline: tree:<hash>` line on success. The diff is then exactly the fixes that round applied, so already-reviewed code is not re-flagged.
 
 You will need to track in-session, per cycle:
 
 - An array of panel-ids, one per round, in order
-- The **pre-fix** tree hash of each round — captured in 2B.10 *before* `git add -u`. The next round uses it as its `--scope tree:` baseline. (Capturing the post-fix tree instead is the off-by-one that yields an empty round-2 diff.)
+- The `next baseline: tree:<hash>` line from each round's wait-panel output — round N+1's `--scope` value
 - For each panel-id, the path to its `dispositions.json` (written by you in 2B.7)
 
 Use your TodoList (or scratch notes — the harness allows it) to hold this. There is no persistent cycle state file; the data is derivable from `~/.orchestra/panels/<panel-id>/` for any panel-id you remember.
@@ -125,7 +125,7 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --name <short-slug>-r<N>)
 ```
 
-Where `$BASELINE_TREE` is the **pre-fix** tree of the previous round, captured in 2B.10 before its fixes were staged. `review-panel` diffs `<BASELINE_TREE>..<current-write-tree>`; since the index now carries the previous round's fixes, that diff is exactly those fixes (plus any incidental staged changes since).
+Where `$BASELINE_TREE` is the hash from the previous round's `next baseline: tree:<hash>` line (printed by wait-panel; also in that round's manifest as `reviewed_tree`). Do not recompute it with `git write-tree` yourself — by fix time the index has moved on. `review-panel` diffs `<BASELINE_TREE>..<current-write-tree>`; since the index now carries the previous round's fixes, that diff is exactly those fixes (plus any incidental staged changes since).
 
 `review-panel` fires both reviewers (one `claude-job`, one `codex-job`) in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` under a `reviewers` object (`claude`, `codex`), each with its job-id. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
 
@@ -143,7 +143,7 @@ Behavior:
 - Polls every 2s, logging only on state change (so stderr stays ~7 lines total regardless of total wait time).
 - Validates: `exit_code` is `0`, `final.md` non-empty, and contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel.
 - Exits `0` only if both reviewers pass. Non-zero exit → surface the summary table to the user; do **not** proceed to reconciliation.
-- On success, prints the two `final.md` paths (one per reviewer) as the last stdout lines — use those in 2B.5.
+- On success, prints the two `final.md` paths (one per reviewer) — use those in 2B.5 — and a final `next baseline: tree:<hash>` line. Record that line; it is the `--scope` value if a round N+1 fires (2B.3).
 
 **If you have parallel work to do** (drafting the PR description, planning the next step), start that work after firing the panel. You'll be notified automatically when the background task completes — do NOT fire `ScheduleWakeup` for this.
 
@@ -254,22 +254,18 @@ You apply the fixes yourself, using your own Edit/Write/Grep/Bash tools. No fixe
 
 Process findings in severity order: critical → high → medium → low. Within a severity, file-group them to avoid multiple seeks to the same file.
 
-**Do not stage during this step.** Leave your edits in the working tree; staging happens once, in 2B.10. This keeps the index equal to the tree the round reviewed, so 2B.10's pre-fix `write-tree` captures the correct baseline. (If a fix creates a *new* file, note it — `git add -u` won't pick it up; you'll add it explicitly in 2B.10.)
+Leave your edits in the working tree as you go; staging happens once, in 2B.10. (If a fix creates a *new* file, note it — `git add -u` won't pick it up; you'll add it explicitly in 2B.10.)
 
-### 2B.10 — Capture the baseline, re-stage, and loop
+### 2B.10 — Re-stage and loop
 
-Capture the tree the panel just reviewed **before** staging this round's fixes — your fixes are still unstaged in the working tree, so `write-tree` here yields the round's pre-fix tree. That tree is the **next** round's baseline:
+Stage this round's fixes:
 
 ```bash
-BASELINE_TREE=$(git -C <effective_cwd> write-tree)   # pre-fix: fixes not yet staged
 git -C <effective_cwd> add -u                        # stage modifications to tracked files
 git -C <effective_cwd> add <new-file>...             # plus any new files a fix created
-echo "round $ROUND baseline for next round: $BASELINE_TREE"
 ```
 
-Record `$BASELINE_TREE` in your in-session cycle state alongside the panel-id. Round N+1 fires with `--scope tree:$BASELINE_TREE` (per 2B.3); since the index now carries this round's fixes, that diff is exactly the fixes you just applied. (`git add -u` stages only tracked-file changes — explicitly `git add` any new file a fix created, or it escapes review.)
-
-> **Order matters.** Capturing *after* `git add -u` records the post-fix tree, which equals the next round's *current* tree — `git diff` would compare it against itself and report an empty review. Capture before staging.
+The next round's baseline is the `next baseline: tree:<hash>` line from this round's wait-panel output (2B.4) — `review-panel` recorded that tree at fire time, before any fixes existed, so it is always the correct pre-fix baseline. Round N+1 fires with that value as `--scope` (per 2B.3); since the index now carries this round's fixes, the diff is exactly the fixes you just applied. (`git add -u` stages only tracked-file changes — explicitly `git add` any new file a fix created, or it escapes review.)
 
 The pre-fix marker (if any) is irrelevant — the tree has changed. Round counter += 1.
 
@@ -315,7 +311,7 @@ Then ask the user with `AskUserQuestion`:
 1. **Ship with current fixes.** Round-3 fixes are applied; write the marker, retry the commit. The 14 LOWs aren't refired against. (Recommended when remaining is L-heavy.)
 2. **Acknowledge and ship.** Update round-3 dispositions to `acknowledged` for the items you don't want to fix, then write the marker.
 3. **Defer to a follow-up PR.** Stage your current fixes, commit; open a follow-up PR for the remaining findings.
-4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.9), capture the baseline (per 2B.10), then refire one more round with `--scope tree:$BASELINE_TREE` (per 2B.3). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
+4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.9), re-stage (per 2B.10), then refire one more round with the last wait-panel's `next baseline: tree:<hash>` as `--scope` (per 2B.3). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
 
 Include the list of `acknowledged` and `false_positive` dispositions across all rounds in your response so the user can audit the decisions.
 
@@ -350,6 +346,6 @@ Include the list of `acknowledged` and `false_positive` dispositions across all 
 - ❌ **Chaining `git add` and `git commit` in the same Bash call.** The hook fires as `PreToolUse` and blocks the entire command — `git add` never runs either. Always issue them as separate Bash tool calls: stage first, confirm with `git diff --cached --stat`, then commit.
 - ❌ **Using `ScheduleWakeup` to wait for panel jobs.** These are background tasks — the harness notifies you automatically when they complete. `ScheduleWakeup` is for `/loop dynamic` mode only. Never fire it inside a review-pipeline run.
 - ❌ **Round 2+ with `--scope staged`.** Defeats the shrinking baseline. Round 1 reviews the full diff; every subsequent round MUST use `--scope tree:<previous round's pre-fix tree>` so the review surface shrinks each round instead of growing. The growing-surface failure mode is what caused the NA-1058 10-round loop.
-- ❌ **Using the post-fix tree as the next round's baseline.** Capture `$BASELINE_TREE` in 2B.10 *before* `git add -u`. The post-fix tree equals the next round's current tree, so `git diff` compares it against itself and `review-panel` exits with an empty-diff error.
+- ❌ **Recomputing the next round's baseline with `git write-tree` yourself.** By the time fixes are staged, `write-tree` yields the post-fix tree — the next round would diff it against itself and `review-panel` exits with an empty-diff error. Always use the `next baseline: tree:<hash>` line wait-panel printed.
 - ❌ **Refiring at MAX_ROUNDS without surfacing the severity table.** The user cannot make an informed continue/stop decision without per-round H/M/L counts and fixed/ack/fp breakdown. Build the table first, then ask.
 - ❌ **Using `acknowledged` as a synonym for "I don't feel like fixing this".** The `reason` must be defensible to a reviewer. Out-of-scope, deferred to a tracked follow-up, or spec-mandated are valid. "Low impact" without justification is not.
