@@ -10,6 +10,8 @@
 #   - exit_code is 0
 #   - final.md exists and size > 0
 #   - final.md contains a severity header OR the "No findings." sentinel
+#   - final.md contains the "## Trace log" header before any severity header
+#     (evidence-traced protocol)
 #
 # Prints one stderr line per state change while waiting and a final summary
 # table to stdout. On success (exit 0), also prints a "reviews ready — …" block
@@ -87,6 +89,15 @@ for reviewer in "${REVIEWERS[@]}"; do
     verdict="FAIL"; note="empty final.md"; FAIL=1
   elif ! grep -qE '^## (Critical|High|Medium|Low)|No findings\.' "$dir/final.md"; then
     verdict="FAIL"; note="missing severity header or 'No findings.'"; FAIL=1
+  elif ! grep -q '^## Trace log' "$dir/final.md"; then
+    verdict="FAIL"; note="no trace log"; FAIL=1
+  else
+    # The protocol mandates the trace log before any severity header.
+    tl_line=$(grep -nm1 '^## Trace log' "$dir/final.md" | cut -d: -f1)
+    sev_line=$(grep -nEm1 '^## (Critical|High|Medium|Low)' "$dir/final.md" | cut -d: -f1 || true)
+    if [[ -n "$sev_line" && "$tl_line" -gt "$sev_line" ]]; then
+      verdict="FAIL"; note="trace log after findings"; FAIL=1
+    fi
   fi
   printf "%-22s %-7s %-12s %-12s %s\n" "$reviewer" "$ec" "${size}B" "$verdict" "$note"
 done

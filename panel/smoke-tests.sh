@@ -46,7 +46,7 @@ JID="${RUNNER}-${NAME}-stub-$$-${RANDOM}"
 JDIR="$HOME/.orchestra/jobs/$RUNNER/$JID"
 mkdir -p "$JDIR"
 cp "$PROMPT" "$JDIR/prompt.txt"
-printf '## Low\n\n### F1: nit\n- **File:** main.go:1\n- **Description:** x\n- **Suggested fix:** y\n' > "$JDIR/final.md"
+printf '## Trace log\n- concern -> main.go:1 -> checked\n\n## Low\n\n### F1: nit\n- **File:** main.go:1\n- **Description:** x\n- **Suggested fix:** y\n' > "$JDIR/final.md"
 echo 0 > "$JDIR/exit_code"
 echo "$JID"
 STUBEOF
@@ -115,6 +115,64 @@ if grep -q "^next baseline: tree:$EXPECTED_TREE$" <<<"$OUT"; then
   ok "wait-panel prints next baseline line"
 else
   fail "wait-panel missing 'next baseline: tree:<hash>' line"
+fi
+
+# Assertion 25-27: wait-panel requires a '## Trace log' header in final.md.
+make_trace_panel() {  # $1=panel-id  $2=claude-final-content
+  local pid="$1" body="$2"
+  local pdir="$HOME/.orchestra/panels/$pid"
+  mkdir -p "$pdir"
+  for r in claude codex; do
+    local jid="${r}-${pid}-job"
+    local jdir="$HOME/.orchestra/jobs/$r/$jid"
+    mkdir -p "$jdir"
+    if [[ "$r" == "claude" ]]; then
+      printf '%b' "$body" > "$jdir/final.md"
+    else
+      printf '## Trace log\n- concern -> main.go:1 -> checked\n\nNo findings. Checked the diff.\n' > "$jdir/final.md"
+    fi
+    echo 0 > "$jdir/exit_code"
+  done
+  jq -n --arg pid "$pid" '{
+    panel_id: $pid,
+    reviewers: {
+      claude: {runner: "claude", job_id: ("claude-" + $pid + "-job")},
+      codex:  {runner: "codex",  job_id: ("codex-"  + $pid + "-job")}
+    }
+  }' > "$pdir/manifest.json"
+}
+
+# 25: findings but no trace log — must FAIL validation (exit 1).
+make_trace_panel tracelog-missing '## Low\n\n### F1: nit\n- **File:** main.go:1\n- **Description:** x\n- **Suggested fix:** y\n'
+if "$WAIT_PANEL" tracelog-missing >/dev/null 2>&1; then
+  fail "wait-panel accepted final.md without a trace log"
+else
+  ok "wait-panel rejects final.md missing trace log"
+fi
+
+# 26: findings plus trace log — must pass (exit 0).
+make_trace_panel tracelog-findings '## Trace log\n- concern -> main.go:1 -> checked\n\n## Low\n\n### F1: nit\n- **File:** main.go:1\n- **Description:** x\n- **Suggested fix:** y\n'
+if "$WAIT_PANEL" tracelog-findings >/dev/null 2>&1; then
+  ok "wait-panel accepts findings + trace log"
+else
+  fail "wait-panel rejected a valid final.md with trace log"
+fi
+
+# 27: 'No findings.' plus trace log — must pass (exit 0).
+make_trace_panel tracelog-nofindings '## Trace log\n- concern -> main.go:1 -> checked\n\nNo findings. Checked the diff.\n'
+if "$WAIT_PANEL" tracelog-nofindings >/dev/null 2>&1; then
+  ok "wait-panel accepts 'No findings.' + trace log"
+else
+  fail "wait-panel rejected 'No findings.' with trace log"
+fi
+
+# 28: trace log buried after the findings — must FAIL (the protocol
+# mandates it before any severity header; presence alone is not enough).
+make_trace_panel tracelog-buried '## Low\n\n### F1: nit\n- **File:** main.go:1\n- **Description:** x\n- **Suggested fix:** y\n\n## Trace log\n- concern -> main.go:1 -> checked\n'
+if "$WAIT_PANEL" tracelog-buried >/dev/null 2>&1; then
+  fail "wait-panel accepted a trace log placed after findings"
+else
+  ok "wait-panel rejects trace log after findings"
 fi
 
 # ── claude-job ──────────────────────────────────────────────────────────────

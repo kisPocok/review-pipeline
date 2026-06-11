@@ -74,6 +74,7 @@ Mandatory sections (write `None — <one-sentence reason>` if a section is genui
 
 ## Constraints
 - <compatibility / performance / security / deployment / privacy>
+- <e.g. `jq required at runtime (verified: command -v jq guard in panel/wait-panel)`>
 - (or `None — standalone change`)
 
 ## Specific concerns to challenge
@@ -86,7 +87,7 @@ Mandatory sections (write `None — <one-sentence reason>` if a section is genui
 - (or `None — flag anything you see`)
 ```
 
-Save to `/tmp/review-pipeline-packet-<slug>.md`. **Never inline this as a heredoc** — always pass via `--packet <path>`.
+Save to `/tmp/review-pipeline-packet-<slug>.md`. **Never inline this as a heredoc** — always pass via `--packet <path>`. Every constraint or factual claim about the repo you write into the packet MUST be verified against the repo at packet-writing time — open the file and cite it. A constraint recalled from memory ("this script must stay POSIX-sh") that the repo contradicts sends both reviewers chasing a false premise.
 
 ### 2B.2 — Cycle concept (read before firing the panel)
 
@@ -141,7 +142,7 @@ One command polls for both reviewer `exit_code` files and validates each `final.
 
 Behavior:
 - Polls every 2s, logging only on state change (so stderr stays ~7 lines total regardless of total wait time).
-- Validates: `exit_code` is `0`, `final.md` non-empty, and contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel.
+- Validates: `exit_code` is `0`, `final.md` non-empty, contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel, and carries the `## Trace log` header the reviewer protocol mandates.
 - Exits `0` only if both reviewers pass. Non-zero exit → surface the summary table to the user; do **not** proceed to reconciliation.
 - On success, prints the two `final.md` paths (one per reviewer) — use those in 2B.5 — and a final `next baseline: tree:<hash>` line. Record that line; it is the `--scope` value if a round N+1 fires (2B.3).
 
