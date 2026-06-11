@@ -4,6 +4,8 @@
 # Usage:
 #   ./install.sh                              # Option A: global hook, fires everywhere
 #   ./install.sh --project <repo-path>        # Option B: hook scoped to one project
+#   ./install.sh --with-permissions           # either option, plus merge the
+#                                             #   autonomous-run permission allowlist
 #
 # Idempotent:
 #   1. Builds the Go hook binary.
@@ -13,16 +15,20 @@
 #      or
 #        <project>/.claude/settings.local.json      (with --project, scoped)
 #      Preserves existing hooks; idempotent.
-#   4. Ensures ~/.orchestra/{jobs,panels,markers}/ exist.
-#   5. Prints next-steps.
+#   4. With --with-permissions: merges the README permission allowlist into
+#      the same settings file (existing entries preserved, no duplicates).
+#   5. Ensures ~/.orchestra/{jobs,panels,markers}/ exist.
+#   6. Prints next-steps.
 
 set -euo pipefail
 
 PROJECT_ROOT=""
+WITH_PERMISSIONS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --project)  PROJECT_ROOT="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
+    --project)           PROJECT_ROOT="$2"; shift 2 ;;
+    --with-permissions)  WITH_PERMISSIONS=1; shift ;;
+    -h|--help)           sed -n '2,21p' "$0"; exit 0 ;;
     *) printf 'install.sh: unknown flag: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -109,12 +115,37 @@ HOOK_CMD="$HOOK_PATH" jq '
 ' "$SETTINGS" > "$TMP"
 mv "$TMP" "$SETTINGS"
 
-# 4. Ensure orchestra dirs exist with safe perms.
+# 4. Optionally merge the autonomous-run permission allowlist (README
+# "Autonomous runs") into the same settings file. Appends only the entries
+# not already present, preserving the user's existing list and order.
+# git permissions stay manual — the README leaves that tradeoff to the user.
+if [[ -n "$WITH_PERMISSIONS" ]]; then
+  log "merging permission allowlist ($SCOPE_LABEL)"
+  TMP=$(mktemp)
+  jq '
+    [
+      "Bash(~/.claude/skills/review-pipeline/panel/preflight)",
+      "Bash(~/.claude/skills/review-pipeline/panel/review-panel:*)",
+      "Bash(~/.claude/skills/review-pipeline/panel/wait-panel:*)",
+      "Bash(~/.claude/skills/review-pipeline/panel/write-marker:*)",
+      "Bash(~/.claude/skills/review-pipeline/triage/check-dispositions:*)",
+      "Bash(jq:*)",
+      "Read(~/.orchestra/**)",
+      "Write(~/.orchestra/**)",
+      "Write(/tmp/review-pipeline-packet-*.md)"
+    ] as $want
+    | (.permissions.allow // []) as $cur
+    | .permissions.allow = ($cur + ($want - $cur))
+  ' "$SETTINGS" > "$TMP"
+  mv "$TMP" "$SETTINGS"
+fi
+
+# 5. Ensure orchestra dirs exist with safe perms.
 mkdir -p "$HOME/.orchestra/jobs/codex" "$HOME/.orchestra/jobs/claude" "$HOME/.orchestra/panels"
 mkdir -p "$HOME/.orchestra/markers"
 chmod 700 "$HOME/.orchestra/markers"
 
-# 5. Next steps.
+# 6. Next steps.
 cat <<EOF
 
 [install] done.
@@ -124,6 +155,7 @@ cat <<EOF
   hook binary    : $HOOK_PATH
   scope          : $SCOPE_LABEL
   settings file  : $SETTINGS
+  permissions    : $([[ -n "$WITH_PERMISSIONS" ]] && echo "allowlist merged (git permissions stay manual — see README)" || echo "not merged — re-run with --with-permissions, or see README 'Autonomous runs'")
 
 Next steps:
   - Verify the hook by running:

@@ -164,12 +164,24 @@ CLAUDE_JOB_ID=$("$CLAUDE_JOB" \
   --repo-root "$REPO_ROOT" \
   --prompt-file "$PROMPT")
 
-CODEX_JOB_ID=$("$CODEX_JOB" \
+# If this second launch fails, the claude job above is already burning a
+# strongest-tier run with no manifest referencing it — terminate it, don't
+# orphan it. The pid file holds the job's background subshell; pkill -P
+# reaches the timeout/claude child underneath it.
+if ! CODEX_JOB_ID=$("$CODEX_JOB" \
   --tier strongest \
   --mode review \
   --name "${PANEL_ID}-codex" \
   --repo-root "$REPO_ROOT" \
-  --prompt-file "$PROMPT")
+  --prompt-file "$PROMPT"); then
+  echo "review-panel: codex-job launch failed — cancelling claude job $CLAUDE_JOB_ID" >&2
+  CLAUDE_PID=$(cat "$HOME/.orchestra/jobs/claude/$CLAUDE_JOB_ID/pid" 2>/dev/null || true)
+  if [[ -n "$CLAUDE_PID" ]]; then
+    pkill -TERM -P "$CLAUDE_PID" 2>/dev/null || true
+    kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+  fi
+  exit 2
+fi
 
 cat > "$PANEL_DIR/manifest.json" <<EOF
 {

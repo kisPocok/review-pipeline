@@ -125,6 +125,27 @@ func TestRun_RealCommitViaCdAndC_HonorsMarker(t *testing.T) {
 	}
 }
 
+func TestBlockMessage_PointsAtWriteMarker_NoCommandSubstitution(t *testing.T) {
+	msg := blockMessage("/some/repo", []string{"--git-dir", "/some/repo/.git"}, "abc123", "")
+
+	if strings.Contains(msg, "$(") {
+		t.Errorf("block message contains $(…) command substitution — running it trips an unsuppressible permission prompt:\n%s", msg)
+	}
+	if !strings.Contains(msg, "panel/write-marker /some/repo --git-dir /some/repo/.git") {
+		t.Errorf("block message must give the write-marker invocation with literal cwd and git globals:\n%s", msg)
+	}
+	if !strings.Contains(msg, "review-pipeline") || !strings.Contains(msg, "STOP") {
+		t.Errorf("block message must tell the agent to STOP and invoke the review-pipeline skill:\n%s", msg)
+	}
+}
+
+func TestBlockMessage_NoGlobals_BareWriteMarkerCall(t *testing.T) {
+	msg := blockMessage("/some/repo", nil, "abc123", "")
+	if !strings.Contains(msg, "panel/write-marker /some/repo\n") {
+		t.Errorf("with no git globals the write-marker call should be just the cwd:\n%s", msg)
+	}
+}
+
 func TestRun_RealCommitConsumeIsSingleUse(t *testing.T) {
 	repo, treeHash := initRepo(t)
 	markerDir := withMarkerDir(t)

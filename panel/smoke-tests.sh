@@ -152,7 +152,7 @@ JOB_DIR="$HOME/.orchestra/jobs/claude/$JOB_ID"
 # Assertion 8: exit_code is the completion sentinel — final.md must already be
 # complete the instant exit_code appears (wait-panel polls on exit_code).
 deadline=$((SECONDS + 20))
-while [[ ! -f "$JOB_DIR/exit_code" && $SECONDS -lt $deadline ]]; do :; done
+while [[ ! -f "$JOB_DIR/exit_code" && $SECONDS -lt $deadline ]]; do sleep 0.1; done
 if [[ -f "$JOB_DIR/exit_code" && -s "$JOB_DIR/final.md" ]]; then
   ok "claude-job: final.md complete when exit_code appears"
 else
@@ -172,7 +172,7 @@ JOB_ID2=$(PATH="$STUBBIN:$PATH" CLAUDE_STUB_NO_RESULT=1 "$CLAUDE_JOB" --tier lig
   --prompt-file "$PACKET" --repo-root "$REPO" --name smoke-noresult 2>/dev/null)
 JOB_DIR2="$HOME/.orchestra/jobs/claude/$JOB_ID2"
 deadline=$((SECONDS + 20))
-while [[ ! -f "$JOB_DIR2/exit_code" && $SECONDS -lt $deadline ]]; do :; done
+while [[ ! -f "$JOB_DIR2/exit_code" && $SECONDS -lt $deadline ]]; do sleep 0.1; done
 if grep -q 'F1: nit' "$JOB_DIR2/final.md" 2>/dev/null; then
   ok "claude-job: falls back to assistant text without result event"
 else
@@ -201,6 +201,236 @@ else
   else
     fail "wait-panel exit $rc on a dead job (want 1)"
   fi
+fi
+
+# Assertion 19: a failed codex-job launch must not orphan the already-fired
+# claude job — review-panel exits non-zero and terminates the claude process.
+cat > "$WORK/stub-claude-orphan" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+NAME="job"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+JID="claude-${NAME}-stub-$$-${RANDOM}"
+JDIR="$HOME/.orchestra/jobs/claude/$JID"
+mkdir -p "$JDIR"
+sleep 60 &
+echo $! > "$JDIR/pid"
+echo "$JID"
+EOF
+printf '#!/usr/bin/env bash\necho "codex-job: boom" >&2\nexit 1\n' > "$WORK/stub-codex-fail"
+chmod +x "$WORK/stub-claude-orphan" "$WORK/stub-codex-fail"
+
+if REVIEW_PIPELINE_CODEX_JOB="$WORK/stub-codex-fail" \
+   REVIEW_PIPELINE_CLAUDE_JOB="$WORK/stub-claude-orphan" \
+   "$REVIEW_PANEL" --repo-root "$REPO" --scope staged --packet "$PACKET" \
+   --name smoke-orphan >/dev/null 2>"$WORK/orphan.err"; then
+  fail "review-panel exited 0 despite codex-job launch failure"
+else
+  ok "review-panel exits non-zero when codex-job launch fails"
+fi
+if grep -q 'cancelling claude job' "$WORK/orphan.err"; then
+  ok "review-panel reports the cancelled claude job"
+else
+  fail "review-panel stderr missing cancellation notice: $(cat "$WORK/orphan.err")"
+fi
+ORPHAN_PID=$(cat "$HOME"/.orchestra/jobs/claude/claude-smoke-orphan-*/pid 2>/dev/null || true)
+if [[ -n "$ORPHAN_PID" ]] && ! kill -0 "$ORPHAN_PID" 2>/dev/null; then
+  ok "claude job process terminated, not orphaned"
+else
+  fail "claude job process still running (pid=$ORPHAN_PID)"
+  kill "$ORPHAN_PID" 2>/dev/null
+fi
+
+# ── check-dispositions ──────────────────────────────────────────────────────
+CHECK_DISP="$SCRIPT_DIR/../triage/check-dispositions"
+
+# Helper: write a dispositions.json under a fresh panel-id and run the check.
+# $1 = panel-id suffix, $2 = dispositions JSON array (as a string).
+write_disp() {
+  local pid="disp-$1"
+  mkdir -p "$HOME/.orchestra/panels/$pid"
+  printf '{"panel_id":"%s","round":1,"findings_path":"x","dispositions":%s}\n' \
+    "$pid" "$2" > "$HOME/.orchestra/panels/$pid/dispositions.json"
+  echo "$pid"
+}
+
+# Assertion 12: medium fixed remaining → proceed to fix, exit 0.
+PID=$(write_disp proceed '[
+  {"finding_id":"F001","severity":"medium","outcome":"fixed","reason":"r"},
+  {"finding_id":"F002","severity":"low","outcome":"false_positive","reason":"r"}]')
+OUT=$("$CHECK_DISP" "$PID" 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && grep -q '^verdict: proceed to fix' <<<"$OUT"; then
+  ok "check-dispositions: proceed verdict on fixed medium"
+else
+  fail "check-dispositions: want proceed verdict + exit 0, got rc=$rc out=$OUT"
+fi
+
+# Assertion 13: unfixed high gates, even with other fixes pending.
+PID=$(write_disp gate '[
+  {"finding_id":"F001","severity":"high","outcome":"acknowledged","reason":"r"},
+  {"finding_id":"F002","severity":"medium","outcome":"fixed","reason":"r"}]')
+OUT=$("$CHECK_DISP" "$PID" 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && grep -q '^verdict: GATE — 1 unfixed critical/high' <<<"$OUT"; then
+  ok "check-dispositions: GATE verdict on unfixed high"
+else
+  fail "check-dispositions: want GATE verdict, got rc=$rc out=$OUT"
+fi
+
+# Assertion 14: nothing to fix (only ack/fp, no critical/high among them).
+PID=$(write_disp done '[
+  {"finding_id":"F001","severity":"low","outcome":"acknowledged","reason":"r"}]')
+OUT=$("$CHECK_DISP" "$PID" 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && grep -q '^verdict: nothing to fix' <<<"$OUT"; then
+  ok "check-dispositions: nothing-to-fix verdict"
+else
+  fail "check-dispositions: want nothing-to-fix verdict, got rc=$rc out=$OUT"
+fi
+
+# Assertion 15: all fixed findings are LOW → LOW-only verdict.
+PID=$(write_disp lowonly '[
+  {"finding_id":"F001","severity":"low","outcome":"fixed","reason":"r"},
+  {"finding_id":"F002","severity":"low","outcome":"fixed","reason":"r"}]')
+OUT=$("$CHECK_DISP" "$PID" 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && grep -q '^verdict: LOW-only' <<<"$OUT"; then
+  ok "check-dispositions: LOW-only verdict"
+else
+  fail "check-dispositions: want LOW-only verdict, got rc=$rc out=$OUT"
+fi
+
+# Assertion 16: empty dispositions array is legitimate (both reviewers clean).
+PID=$(write_disp empty '[]')
+OUT=$("$CHECK_DISP" "$PID" 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && grep -q '^verdict: nothing to fix' <<<"$OUT"; then
+  ok "check-dispositions: empty array valid, nothing to fix"
+else
+  fail "check-dispositions: empty array should pass, got rc=$rc out=$OUT"
+fi
+
+# Assertion 17: malformed entry (missing severity) → exit 1.
+PID=$(write_disp bad '[
+  {"finding_id":"F001","outcome":"fixed","reason":"r"}]')
+if "$CHECK_DISP" "$PID" >/dev/null 2>&1; then
+  fail "check-dispositions: accepted an entry with no severity"
+else
+  [[ $? -eq 1 ]] && ok "check-dispositions: rejects missing severity with exit 1" \
+    || fail "check-dispositions: wrong exit code on invalid entry"
+fi
+
+# Assertion 18: missing dispositions.json → exit 2.
+"$CHECK_DISP" "no-such-panel-id" >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok "check-dispositions: exit 2 on missing file" \
+  || fail "check-dispositions: want exit 2 on missing file"
+
+# ── preflight ────────────────────────────────────────────────────────────────
+# Copy preflight into a scratch skill tree — it checks paths relative to its
+# own location, so the real tree would mask a missing-file regression.
+PF_SKILL="$WORK/pf-skill"
+mkdir -p "$PF_SKILL/panel" "$PF_SKILL/triage" "$PF_SKILL/jobs" "$PF_SKILL/hook/bin"
+cp "$SCRIPT_DIR/preflight" "$PF_SKILL/panel/preflight"
+for f in panel/review-panel panel/wait-panel panel/write-marker \
+         triage/check-dispositions jobs/claude-job jobs/codex-job; do
+  printf '#!/bin/sh\n' > "$PF_SKILL/$f"
+  chmod +x "$PF_SKILL/$f"
+done
+: > "$PF_SKILL/panel/reviewer-preamble.md"
+printf '#!/bin/sh\nexit 0\n' > "$STUBBIN/codex"
+chmod +x "$STUBBIN/codex"
+
+# Assertion 23: missing hook binary is fatal — it's gitignored, so a fresh
+# clone without install.sh would otherwise commit with no review, silently.
+ERR=$(PATH="$STUBBIN:$PATH" "$PF_SKILL/panel/preflight" 2>&1 >/dev/null); rc=$?
+if [[ $rc -ne 0 ]] && grep -q 'hook binary' <<<"$ERR"; then
+  ok "preflight: fails on missing hook binary"
+else
+  fail "preflight: rc=$rc with no hook binary (want non-zero + 'hook binary'): $ERR"
+fi
+
+# Assertion 24: no gtimeout/timeout on PATH → non-fatal warning (reviewer
+# jobs run unbounded without one), exit stays 0.
+printf '#!/bin/sh\n' > "$PF_SKILL/hook/bin/pre-commit-check"
+chmod +x "$PF_SKILL/hook/bin/pre-commit-check"
+ONLYBIN="$WORK/onlybin"
+mkdir -p "$ONLYBIN"
+for t in bash dirname install mktemp rm jq git; do
+  ln -s "$(command -v "$t")" "$ONLYBIN/$t"
+done
+for t in claude codex; do
+  printf '#!/bin/sh\nexit 0\n' > "$ONLYBIN/$t"
+  chmod +x "$ONLYBIN/$t"
+done
+ERR=$(PATH="$ONLYBIN" "$PF_SKILL/panel/preflight" 2>&1 >/dev/null); rc=$?
+if [[ $rc -eq 0 ]] && grep -q 'gtimeout' <<<"$ERR"; then
+  ok "preflight: warns non-fatally when gtimeout/timeout missing"
+else
+  fail "preflight: rc=$rc err=$ERR (want exit 0 + gtimeout warning)"
+fi
+
+# ── install.sh --with-permissions ───────────────────────────────────────────
+# Run a copy of install.sh against the scratch HOME with a stubbed `go`, so
+# the test never touches the real binary, skills symlink, or settings.
+INSTALL_SRC="$WORK/install-src"
+mkdir -p "$INSTALL_SRC/hook/cmd/pre-commit-check"
+cp "$SCRIPT_DIR/../install.sh" "$INSTALL_SRC/install.sh"
+
+GOSTUB="$WORK/gostub"
+mkdir -p "$GOSTUB"
+cat > "$GOSTUB/go" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+done
+[[ -n "$out" ]] || exit 1
+mkdir -p "$(dirname "$out")"
+printf '#!/bin/sh\n' > "$out"
+chmod +x "$out"
+EOF
+chmod +x "$GOSTUB/go"
+
+SETTINGS_FILE="$HOME/.claude/settings.json"
+rm -f "$SETTINGS_FILE"
+
+# Assertion 20: plain install must not write any permissions.
+PATH="$GOSTUB:$PATH" "$INSTALL_SRC/install.sh" >/dev/null 2>&1
+if jq -e '.permissions == null' "$SETTINGS_FILE" >/dev/null 2>&1; then
+  ok "install.sh: no permissions written without --with-permissions"
+else
+  fail "install.sh: wrote permissions without the flag"
+fi
+
+# Seed a user entry to prove the merge preserves what's already there.
+TMPJ=$(mktemp)
+jq '.permissions.allow = ["Bash(custom:*)"]' "$SETTINGS_FILE" > "$TMPJ"
+mv "$TMPJ" "$SETTINGS_FILE"
+
+# Assertion 21: --with-permissions merges the README allowlist, keeping
+# pre-existing user entries.
+PATH="$GOSTUB:$PATH" "$INSTALL_SRC/install.sh" --with-permissions >/dev/null 2>&1
+if jq -e '
+  .permissions.allow
+  | index("Bash(custom:*)")
+    and index("Bash(~/.claude/skills/review-pipeline/panel/preflight)")
+    and index("Bash(~/.claude/skills/review-pipeline/triage/check-dispositions:*)")
+    and index("Write(/tmp/review-pipeline-packet-*.md)")
+' "$SETTINGS_FILE" >/dev/null 2>&1; then
+  ok "install.sh: --with-permissions merges allowlist, keeps user entries"
+else
+  fail "install.sh: allowlist merge wrong: $(jq -c '.permissions' "$SETTINGS_FILE" 2>/dev/null)"
+fi
+
+# Assertion 22: re-running with the flag is idempotent — no duplicates.
+N1=$(jq '.permissions.allow | length' "$SETTINGS_FILE" 2>/dev/null)
+PATH="$GOSTUB:$PATH" "$INSTALL_SRC/install.sh" --with-permissions >/dev/null 2>&1
+N2=$(jq '.permissions.allow | length' "$SETTINGS_FILE" 2>/dev/null)
+if [[ -n "$N1" && "$N1" == "$N2" ]]; then
+  ok "install.sh: --with-permissions idempotent ($N1 entries)"
+else
+  fail "install.sh: rerun changed allow count ($N1 -> $N2)"
 fi
 
 rm -rf "$WORK"

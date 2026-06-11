@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# check-dispositions: validate a panel's dispositions.json and print the
+# review loop's continue/stop verdict.
+#
+# Usage:
+#   check-dispositions <panel-id>
+#
+# Reads $HOME/.orchestra/panels/<panel-id>/dispositions.json. On a valid file
+# prints "dispositions OK", one "<outcome>: <count>" line per outcome present,
+# and a final verdict line — one of:
+#   verdict: GATE — <n> unfixed critical/high; ask the user
+#   verdict: nothing to fix — write the marker and retry the commit
+#   verdict: LOW-only fixes — surface to the user
+#   verdict: proceed to fix — critical/high/medium findings remain
+#
+# The GATE verdict wins over everything else: a critical/high finding at
+# `acknowledged` or `false_positive` needs the user's sign-off before any
+# marker is written, even when fixed_count is 0.
+#
+# Exits:
+#   0 — file valid; verdict printed
+#   1 — file invalid (every entry needs finding_id, severity, outcome, reason)
+#   2 — bad usage / missing file / jq missing
+
+set -euo pipefail
+
+PANEL_ID="${1:-}"
+[[ -n "$PANEL_ID" ]] || { echo "check-dispositions: usage: check-dispositions <panel-id>" >&2; exit 2; }
+command -v jq >/dev/null || { echo "check-dispositions: jq not installed" >&2; exit 2; }
+
+FILE="$HOME/.orchestra/panels/$PANEL_ID/dispositions.json"
+[[ -f "$FILE" ]] || { echo "check-dispositions: not found: $FILE" >&2; exit 2; }
+
+# type == "string" guards before test/length: a missing field is null, and
+# null | strings yields an empty stream, which all() treats as vacuously true.
+if ! jq -e '(.dispositions | type == "array") and (.dispositions | all(
+  (.finding_id | (type == "string") and test("^F[0-9]{3,}$"))
+  and (.severity | (type == "string") and IN("critical","high","medium","low"))
+  and (.outcome  | (type == "string") and IN("fixed","acknowledged","false_positive"))
+  and (.reason   | (type == "string") and (length > 0))
+))' "$FILE" >/dev/null 2>&1; then
+  echo "check-dispositions: INVALID — every entry needs finding_id (F###), severity, outcome, reason" >&2
+  exit 1
+fi
+
+echo "dispositions OK"
+
+jq -r '.dispositions | group_by(.outcome) | map("\(.[0].outcome): \(length)") | .[]' "$FILE"
+
+jq -r '
+  ([.dispositions[] | select(.outcome != "fixed" and (.severity | IN("critical","high")))] | length) as $gated
+  | [.dispositions[] | select(.outcome == "fixed") | .severity] as $fixed
+  | if $gated > 0 then
+      "verdict: GATE — \($gated) unfixed critical/high; ask the user"
+    elif ($fixed | length) == 0 then
+      "verdict: nothing to fix — write the marker and retry the commit"
+    elif ($fixed | all(. == "low")) then
+      "verdict: LOW-only fixes — surface to the user"
+    else
+      "verdict: proceed to fix — critical/high/medium findings remain"
+    end
+' "$FILE"

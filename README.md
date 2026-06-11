@@ -22,6 +22,8 @@ Prereqs: `go ≥ 1.21`, `jq`, `git`, `codex` CLI (API-key auth, `~/.codex/`), `c
 ```bash
 ./install.sh                              # global: hook fires on every commit
 ./install.sh --project /path/to/repo      # scoped: hook only in that repo
+./install.sh --with-permissions           # either option, plus merge the
+                                          #   autonomous-run permission allowlist
 ```
 
 `install.sh` builds the hook binary, symlinks the repo into `~/.claude/skills/review-pipeline/`, creates `~/.orchestra/{jobs,panels,markers}/`, and registers the hook in:
@@ -35,7 +37,7 @@ Idempotent; re-run any time to add another project.
 
 ## Autonomous runs (permissions)
 
-Clearing the hook runs `preflight`, the panel scripts, `jq`, and `git`, and reads/writes under `~/.orchestra` and `/tmp`. To run the loop without a permission prompt at each step, add these to the **same settings file you registered the hook in** — global `~/.claude/settings.json`, or `<project>/.claude/settings.local.json` when installed with `--project`:
+Clearing the hook runs `preflight`, the panel scripts, `jq`, and `git`, and reads/writes under `~/.orchestra` and `/tmp`. To run the loop without a permission prompt at each step, add these to the **same settings file you registered the hook in** — global `~/.claude/settings.json`, or `<project>/.claude/settings.local.json` when installed with `--project`. `./install.sh --with-permissions` merges this list into that file for you (idempotent, existing entries preserved):
 
 ```json
 {
@@ -45,6 +47,7 @@ Clearing the hook runs `preflight`, the panel scripts, `jq`, and `git`, and read
       "Bash(~/.claude/skills/review-pipeline/panel/review-panel:*)",
       "Bash(~/.claude/skills/review-pipeline/panel/wait-panel:*)",
       "Bash(~/.claude/skills/review-pipeline/panel/write-marker:*)",
+      "Bash(~/.claude/skills/review-pipeline/triage/check-dispositions:*)",
       "Bash(jq:*)",
       "Read(~/.orchestra/**)",
       "Write(~/.orchestra/**)",
@@ -79,6 +82,7 @@ review-pipeline/
 │   ├── write-marker                        # write-tree + touch marker
 │   └── reviewer-preamble.md               # fixed preamble: 4 concerns + output format
 ├── triage/
-│   └── disposition-schema.json             # per-finding outcomes recorded by main Claude
+│   ├── disposition-schema.json             # per-finding outcomes recorded by main Claude
+│   └── check-dispositions                  # validate dispositions.json + print loop verdict
 └── go.mod / go.sum                         # mvdan.cc/sh/v3 for the hook
 ```

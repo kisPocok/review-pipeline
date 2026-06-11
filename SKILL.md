@@ -190,70 +190,30 @@ Build and write `~/.orchestra/panels/$PANEL_ID/dispositions.json` matching `tria
 
 Write the file before applying fixes (your decisions are made; the file records them). If you change your mind mid-fix (e.g., a `fixed` finding turns out to need a redesign), update the file to `acknowledged` with a reason before refiring the next round.
 
-Validate the file — not just well-formed JSON, but that every disposition carries the schema's required fields. A missing `severity` would pass a bare `jq empty` and then crash the 2B.11 table (`null` can't be a jq object key):
-
-An empty `dispositions: []` is legitimate (a round where both reviewers returned `No findings.`) — the check below accepts it (`[] | all(...)` is `true` in jq) and only rejects entries that are actually malformed. It exits non-zero on failure so the failure is a real signal, not a buried stderr line:
+Then validate it and get the loop verdict in one command:
 
 ```bash
-if jq -e '(.dispositions | type == "array") and (.dispositions | all(
-  (.finding_id | test("^F[0-9]{3,}$"))
-  and (.severity | IN("critical","high","medium","low"))
-  and (.outcome  | IN("fixed","acknowledged","false_positive"))
-  and (.reason   | (type == "string") and (length > 0))
-))' ~/.orchestra/panels/$PANEL_ID/dispositions.json >/dev/null; then
-  echo "dispositions OK"
-else
-  echo "dispositions INVALID — every entry needs finding_id, severity, outcome, reason" >&2
-  exit 1
-fi
+~/.claude/skills/review-pipeline/triage/check-dispositions "$PANEL_ID"
 ```
 
-### 2B.8 — Decide whether to continue
+It validates every entry (finding_id `F###`, severity, outcome, non-empty reason — a missing `severity` would otherwise crash the 2B.11 table), prints per-outcome counts, and ends with a `verdict:` line that drives 2B.8. An empty `dispositions: []` is legitimate (a round where both reviewers returned `No findings.`) and verdicts as nothing-to-fix. Non-zero exit → the file is malformed; fix it and re-run before continuing.
 
-Count outcomes from the disposition file you just wrote:
+### 2B.8 — Act on the verdict
 
-```bash
-jq -r '.dispositions | group_by(.outcome) | map("\(.[0].outcome): \(length)") | .[]' \
-  ~/.orchestra/panels/$PANEL_ID/dispositions.json
-```
+`check-dispositions` (2B.7) ended with a `verdict:` line. Act on it:
 
-- `fixed_count` — findings you will apply code changes for this round.
-- `acknowledged_count` — findings you accepted as out-of-scope risk.
-- `false_positive_count` — findings you dismissed.
+**`verdict: GATE — N unfixed critical/high; ask the user`** — a critical or high finding you decided *not* to fix (`acknowledged` or `false_positive`) needs the user's sign-off before anything else, including any marker. You may be right, but you are also the author of the change being reviewed; the user audits that call before it ships silently. Surface each such finding (id, severity, outcome, your reason) via `AskUserQuestion` with options per finding-set: **Accept and ship** (keep the disposition, proceed), **Fix this round** (flip to `fixed`, proceed to 2B.9), or **Defer to a tracked follow-up** (keep `acknowledged`, add the tracker reference to `reason`). After the answer (and any disposition edits), re-run `check-dispositions` and act on the new verdict. Low/medium non-fix dispositions do not gate — the dispositions file records them for audit.
 
-**Unfixed critical/high gate (check FIRST, before any marker):** a critical or high finding you decided *not* to fix — `acknowledged` or `false_positive` — needs the user's sign-off. You may be right, but you are also the author of the change being reviewed; the user audits that call before it ships silently:
+**`verdict: nothing to fix — write the marker and retry the commit`** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
 
-```bash
-jq -r '[.dispositions[] | select(.outcome != "fixed" and (.severity | IN("critical","high")))]
-  | if length == 0 then "no unfixed critical/high — proceed"
-    else "GATE: \(length) unfixed critical/high — ask the user" end' \
-  ~/.orchestra/panels/$PANEL_ID/dispositions.json
-```
-
-When gated, surface each such finding (id, severity, outcome, your reason) via `AskUserQuestion` with options per finding-set: **Accept and ship** (keep the disposition, proceed), **Fix this round** (flip to `fixed`, proceed to 2B.9), or **Defer to a tracked follow-up** (keep `acknowledged`, add the tracker reference to `reason`). Only continue past this gate with the user's answer. Low/medium non-fix dispositions do not gate — the dispositions file records them for audit.
-
-**Nothing to fix (`fixed_count == 0`, gate passed)** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
-
-**Convergence gate (LOW-only):**
-
-- If `fixed_count > 0` but every `outcome: fixed` finding has `severity: low` (i.e., no `critical`/`high`/`medium` remains to fix), STOP and surface to the user. Check it straight from the disposition file:
-
-```bash
-jq -r '[.dispositions[] | select(.outcome == "fixed") | .severity] as $s
-  | if ($s | length) == 0 then "no fixes"
-    elif ($s | all(. == "low")) then "LOW-only — surface to user"
-    else "has critical/high/medium — proceed to fix" end' \
-  ~/.orchestra/panels/$PANEL_ID/dispositions.json
-```
-
-When it reports LOW-only, use `AskUserQuestion` with three options:
+**`verdict: LOW-only fixes — surface to the user`** — every `outcome: fixed` finding is `severity: low`; STOP and use `AskUserQuestion` with three options:
   1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
   2. **Fix and ship.** Apply the LOW fixes this round, but write the marker after this round without refiring another panel. No round N+1.
   3. **Fix and continue.** Apply the LOWs and refire (standard loop). Only choose this if there's a concrete reason to expect new HIGHs hiding behind the LOW fixes.
 
   Surface the LOW finding titles in the question text so the user can judge.
 
-- Otherwise (HIGH/CRITICAL/MEDIUM remain to fix) → proceed to 2B.9 (apply fixes), then 2B.10 (re-stage and refire).
+**`verdict: proceed to fix — critical/high/medium findings remain`** → proceed to 2B.9 (apply fixes), then 2B.10 (re-stage and refire).
 
 ### 2B.9 — Apply fixes (in-session)
 

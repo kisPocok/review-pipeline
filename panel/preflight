@@ -30,6 +30,7 @@ for f in \
   "$SKILL_DIR/panel/review-panel" \
   "$SKILL_DIR/panel/wait-panel" \
   "$SKILL_DIR/panel/write-marker" \
+  "$SKILL_DIR/triage/check-dispositions" \
   "$SKILL_DIR/jobs/claude-job" \
   "$SKILL_DIR/jobs/codex-job"
 do
@@ -39,10 +40,19 @@ done
 [[ -f "$SKILL_DIR/panel/reviewer-preamble.md" ]] \
   || { echo "preflight: missing $SKILL_DIR/panel/reviewer-preamble.md" >&2; exit 1; }
 
+# The hook binary is gitignored — a fresh clone without install.sh would
+# otherwise commit with no review, silently.
+[[ -x "$SKILL_DIR/hook/bin/pre-commit-check" ]] \
+  || { echo "preflight: hook binary missing or non-executable: $SKILL_DIR/hook/bin/pre-commit-check — run install.sh" >&2; exit 1; }
+
 # 4. Required external tools.
 command -v jq      >/dev/null || { echo "preflight: jq not on PATH" >&2; exit 1; }
 command -v git     >/dev/null || { echo "preflight: git not on PATH" >&2; exit 1; }
 command -v claude  >/dev/null || { echo "preflight: claude CLI not on PATH" >&2; exit 1; }
 command -v codex   >/dev/null || { echo "preflight: codex CLI not on PATH" >&2; exit 1; }
+
+# Non-fatal: without gtimeout/timeout, reviewer jobs run with no time bound.
+command -v gtimeout >/dev/null || command -v timeout >/dev/null \
+  || echo "preflight: warning — no gtimeout/timeout on PATH; reviewer jobs run unbounded (brew install coreutils)" >&2
 
 echo "pre-flight OK"

@@ -128,13 +128,10 @@ func blockMessage(cwd string, globals []string, hash, extra string) string {
 		hashDisplay = "<unknown — write-tree failed or no index>"
 	}
 
-	writeTreeCmd := "git " + strings.Join(globals, " ")
-	if len(globals) == 0 {
-		writeTreeCmd = "git "
-	} else {
-		writeTreeCmd += " "
+	writeMarkerCmd := "~/.claude/skills/review-pipeline/panel/write-marker " + cwd
+	if len(globals) > 0 {
+		writeMarkerCmd += " " + strings.Join(globals, " ")
 	}
-	writeTreeCmd += fmt.Sprintf("-C %s write-tree", cwd)
 
 	var b strings.Builder
 	b.WriteString("review-pipeline hook: a real `git commit` is about to run.\n")
@@ -144,18 +141,14 @@ func blockMessage(cwd string, globals []string, hash, extra string) string {
 	if extra != "" {
 		fmt.Fprintf(&b, "  note:          %s\n", extra)
 	}
-	b.WriteString("\n❌ STOP. Invoke the `review-pipeline` skill BEFORE this commit.\n\n")
-	b.WriteString("  - Trivial diff (no semantic logic change, multi-line cosmetic, doc-only edit, rename, version bump, etc.) → write the marker and retry the commit.\n")
-	// b.WriteString("  - Interactive mode  → ask the user via AskUserQuestion whether to run the\n")
-	// b.WriteString("                        review panel first; honor the answer.\n")
-	b.WriteString("  - Autonomous mode (multi-file implementation, or /goal invocation) →\n")
-	b.WriteString("                        run the review panel automatically without asking.\n\n")
-	b.WriteString("After processing the review and applying valid fixes (or after the user opts\n")
-	b.WriteString("out), AND BEFORE re-running git commit, mark the post-fix staged tree as\n")
-	b.WriteString("reviewed:\n\n")
-	fmt.Fprintf(&b, "    MDIR=\"$HOME/.orchestra/markers\"\n")
-	fmt.Fprintf(&b, "    install -d -m 700 \"$MDIR\"\n")
-	fmt.Fprintf(&b, "    touch \"$MDIR/$(%s)\"\n\n", writeTreeCmd)
+	b.WriteString("\n❌ STOP. Invoke the `review-pipeline` skill BEFORE this commit. It covers\n")
+	b.WriteString("classifying the diff (trivial vs non-trivial), running the review panel,\n")
+	b.WriteString("and applying fixes.\n\n")
+	b.WriteString("When the skill says to write the marker, run exactly:\n\n")
+	fmt.Fprintf(&b, "    %s\n\n", writeMarkerCmd)
+	b.WriteString("then retry the commit. Do NOT build the marker path yourself by command-\n")
+	b.WriteString("substituting `git write-tree` — command substitution trips a permission\n")
+	b.WriteString("prompt no allowlist entry can suppress.\n\n")
 	b.WriteString("The marker is keyed to the exact staged tree (under the same git globals\n")
 	b.WriteString("the hook saw), single-use (consumed via atomic unlink), and owner-private.\n\n")
 	b.WriteString("If you have already completed the review for the current staged tree in\n")
