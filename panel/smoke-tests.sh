@@ -175,6 +175,46 @@ else
   fail "round 2 did not append correctly: $(cat "$CYCLE_FILE" 2>/dev/null)"
 fi
 
+run_panel_r2() {  # fire a round-2 panel with a given --cycle value; stdout silenced, stderr left for the caller
+  REVIEW_PIPELINE_CODEX_JOB="$WORK/stub-codex" \
+  REVIEW_PIPELINE_CLAUDE_JOB="$WORK/stub-claude" \
+  "$REVIEW_PANEL" --repo-root "$REPO" --scope "tree:$REVIEWED_TREE" \
+  --cycle "$1" --packet "$PACKET" --name smoke-bad >/dev/null
+}
+
+# Assertion C6: a --cycle id with path-traversal chars is rejected by the regex
+# gate specifically (assert the message, so deleting the regex flips this red even
+# though the existence check would also reject this id).
+if run_panel_r2 "../escape" 2>"$WORK/c6.err"; then
+  fail "review-panel accepted a --cycle id with '/' and '..'"
+elif ! grep -q 'must match' "$WORK/c6.err"; then
+  fail "C6 rejected ../escape for the wrong reason (not the regex gate): $(cat "$WORK/c6.err")"
+else
+  ok "review-panel rejects an unsafe --cycle id"
+fi
+
+# Assertion C7: a well-formed but unrecorded --cycle id fails loudly (no new round-1 file).
+STALE_ID="cycle-does-not-exist-0000"
+if run_panel_r2 "$STALE_ID" 2>/dev/null; then
+  fail "review-panel accepted a --cycle id with no record"
+elif [[ -f "$HOME/.orchestra/cycles/$STALE_ID.json" ]]; then
+  fail "review-panel created a record for an unrecorded --cycle id"
+else
+  ok "review-panel rejects an unrecorded --cycle id without creating a file"
+fi
+
+# Assertion C8: appending over a malformed existing cycle file fails; file is left intact.
+echo 'not valid json {' > "$CYCLE_FILE"
+if run_panel_r2 "$CYCLE_ID" 2>/dev/null; then
+  fail "review-panel reported success appending over a malformed cycle file"
+elif [[ "$(cat "$CYCLE_FILE")" != 'not valid json {' ]]; then
+  fail "review-panel mutated the malformed cycle file instead of leaving it intact"
+else
+  ok "review-panel fails on a malformed cycle file without claiming success"
+fi
+# Restore a valid two-round cycle file for any later assertions that read it.
+jq -n --arg cid "$CYCLE_ID" '{cycle_id:$cid, rounds:[{round:1},{round:2}]}' > "$CYCLE_FILE"
+
 # Assertion 25-27: wait-panel requires a '## Trace log' header in final.md.
 make_trace_panel() {  # $1=panel-id  $2=claude-final-content
   local pid="$1" body="$2"

@@ -34,6 +34,7 @@ SCOPE="staged"
 PACKET=""
 NAME="panel"
 CYCLE_ID=""
+CYCLE_PROVIDED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,13 +42,26 @@ while [[ $# -gt 0 ]]; do
     --scope)       SCOPE="$2"; shift 2 ;;
     --packet)      PACKET="$2"; shift 2 ;;
     --name)        NAME="$2"; shift 2 ;;
-    --cycle)       CYCLE_ID="$2"; shift 2 ;;
+    --cycle)       CYCLE_ID="$2"; CYCLE_PROVIDED=1; shift 2 ;;
     -h|--help)     sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "review-panel: unknown flag: $1" >&2; exit 2 ;;
   esac
 done
 
 [[ -d "$REPO_ROOT" ]] || { echo "review-panel: --repo-root must be a directory" >&2; exit 2; }
+
+CYCLES_DIR="$HOME/.orchestra/cycles"
+
+# A --cycle id reaches a filesystem path and the manifest JSON; constrain it so a
+# stray '/' or '..' cannot escape the cycles dir or break the manifest. A provided
+# id with no record means a stale/typoed id — recording it as a fresh round 1 would
+# desync the recovery flow, so reject both before firing the reviewers.
+if [[ "$CYCLE_PROVIDED" -eq 1 ]]; then
+  [[ "$CYCLE_ID" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "review-panel: --cycle id must match [A-Za-z0-9._-]+" >&2; exit 2; }
+  [[ -f "$CYCLES_DIR/$CYCLE_ID.json" ]] || {
+    echo "review-panel: --cycle $CYCLE_ID has no record at $CYCLES_DIR/$CYCLE_ID.json" >&2; exit 2; }
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SKILL_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -217,7 +231,6 @@ EOF
 # Durable per-cycle record: lets a fresh agent (post-compaction) recover the
 # panel-ids, baselines, and disposition paths for every round without holding
 # them in working memory. Round 1 creates it; round 2+ appends.
-CYCLES_DIR="$HOME/.orchestra/cycles"
 mkdir -p "$CYCLES_DIR"
 CYCLE_FILE="$CYCLES_DIR/$CYCLE_ID.json"
 ROUND_ENTRY=$(jq -n \
@@ -229,20 +242,25 @@ ROUND_ENTRY=$(jq -n \
   --arg started_at "$NOW" \
   '{panel_id:$panel_id, scope:$scope, scope_label:$scope_label, reviewed_tree:$reviewed_tree, dispositions_path:$dispositions_path, started_at:$started_at}')
 
+# Write through a same-dir temp + atomic rename so a crash mid-write cannot leave
+# a truncated cycle file the recovery flow depends on, and a jq failure aborts
+# instead of silently dropping the round.
+CYCLE_TMP=$(mktemp "$CYCLES_DIR/.tmp.XXXXXX")
 if [[ -f "$CYCLE_FILE" ]]; then
-  CYCLE_TMP=$(mktemp)
-  jq --argjson round "$ROUND_ENTRY" --arg now "$NOW" \
-    '.rounds += [$round + {round: ((.rounds | length) + 1)}] | .updated_at = $now' \
-    "$CYCLE_FILE" > "$CYCLE_TMP" && mv "$CYCLE_TMP" "$CYCLE_FILE"
+  CYCLE_WRITE=(jq --argjson round "$ROUND_ENTRY" --arg now "$NOW"
+    '.rounds += [$round + {round: ((.rounds | length) + 1)}] | .updated_at = $now'
+    "$CYCLE_FILE")
 else
-  jq -n \
-    --arg cycle_id "$CYCLE_ID" \
-    --arg repo_root "$REPO_ROOT" \
-    --arg now "$NOW" \
-    --argjson round "$ROUND_ENTRY" \
-    '{cycle_id:$cycle_id, repo_root:$repo_root, created_at:$now, updated_at:$now, rounds:[($round + {round:1})]}' \
-    > "$CYCLE_FILE"
+  CYCLE_WRITE=(jq -n
+    --arg cycle_id "$CYCLE_ID" --arg repo_root "$REPO_ROOT" --arg now "$NOW"
+    --argjson round "$ROUND_ENTRY"
+    '{cycle_id:$cycle_id, repo_root:$repo_root, created_at:$now, updated_at:$now, rounds:[($round + {round:1})]}')
 fi
+if ! "${CYCLE_WRITE[@]}" > "$CYCLE_TMP"; then
+  rm -f "$CYCLE_TMP"
+  echo "review-panel: failed to write cycle record at $CYCLE_FILE" >&2; exit 2
+fi
+mv "$CYCLE_TMP" "$CYCLE_FILE"
 echo "review-panel: cycle $CYCLE_ID — recorded round at $CYCLE_FILE" >&2
 
 echo "$PANEL_ID"
