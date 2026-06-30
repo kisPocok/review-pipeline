@@ -5,7 +5,14 @@
 #   review-panel --repo-root <path> \
 #                [--scope staged|branch:<base>|tree:<hash>] \
 #                [--packet <path-to-shared-context-md>] \
-#                [--name SHORT]
+#                [--name SHORT] \
+#                [--cycle <cycle-id>]
+#
+# Cycle:
+#   Omit --cycle on round 1 — a cycle-id is generated and a per-cycle record is
+#   created at $HOME/.orchestra/cycles/<cycle-id>.json. Pass --cycle <id> on
+#   round 2+ to append that round to the same record. wait-panel surfaces the
+#   cycle-id (and the next baseline) on success.
 #
 # Scopes:
 #   staged       — git diff --cached (the default; round 1 of a review cycle).
@@ -26,6 +33,7 @@ REPO_ROOT=""
 SCOPE="staged"
 PACKET=""
 NAME="panel"
+CYCLE_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --scope)       SCOPE="$2"; shift 2 ;;
     --packet)      PACKET="$2"; shift 2 ;;
     --name)        NAME="$2"; shift 2 ;;
+    --cycle)       CYCLE_ID="$2"; shift 2 ;;
     -h|--help)     sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "review-panel: unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -50,6 +59,7 @@ PREAMBLE="$SKILL_ROOT/panel/reviewer-preamble.md"
 [[ -x "$CODEX_JOB"    ]] || { echo "review-panel: codex-job missing at $CODEX_JOB" >&2; exit 2; }
 [[ -x "$CLAUDE_JOB"   ]] || { echo "review-panel: claude-job missing at $CLAUDE_JOB" >&2; exit 2; }
 [[ -f "$PREAMBLE"     ]] || { echo "review-panel: reviewer-preamble.md missing at $PREAMBLE" >&2; exit 2; }
+command -v jq >/dev/null || { echo "review-panel: jq not installed" >&2; exit 2; }
 
 # Capture the diff once for all lenses.
 case "$SCOPE" in
@@ -183,19 +193,56 @@ if ! CODEX_JOB_ID=$("$CODEX_JOB" \
   exit 2
 fi
 
+NOW=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)
+
+# A new cycle (round 1) gets a generated id; round 2+ reuses the one passed in.
+[[ -n "$CYCLE_ID" ]] || CYCLE_ID="cycle-${NAME}-$(date +%Y%m%d-%H%M%S)-$$"
+
 cat > "$PANEL_DIR/manifest.json" <<EOF
 {
   "panel_id": "$PANEL_ID",
+  "cycle_id": "$CYCLE_ID",
   "scope": "$SCOPE",
   "scope_label": "$SCOPE_LABEL",
   "reviewed_tree": "$REVIEWED_TREE",
   "repo_root": "$REPO_ROOT",
-  "started_at": "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)",
+  "started_at": "$NOW",
   "reviewers": {
     "claude": {"runner": "claude", "tier": "strongest", "job_id": "$CLAUDE_JOB_ID"},
     "codex":  {"runner": "codex",  "tier": "strongest", "job_id": "$CODEX_JOB_ID"}
   }
 }
 EOF
+
+# Durable per-cycle record: lets a fresh agent (post-compaction) recover the
+# panel-ids, baselines, and disposition paths for every round without holding
+# them in working memory. Round 1 creates it; round 2+ appends.
+CYCLES_DIR="$HOME/.orchestra/cycles"
+mkdir -p "$CYCLES_DIR"
+CYCLE_FILE="$CYCLES_DIR/$CYCLE_ID.json"
+ROUND_ENTRY=$(jq -n \
+  --arg panel_id "$PANEL_ID" \
+  --arg scope "$SCOPE" \
+  --arg scope_label "$SCOPE_LABEL" \
+  --arg reviewed_tree "$REVIEWED_TREE" \
+  --arg dispositions_path "$PANEL_DIR/dispositions.json" \
+  --arg started_at "$NOW" \
+  '{panel_id:$panel_id, scope:$scope, scope_label:$scope_label, reviewed_tree:$reviewed_tree, dispositions_path:$dispositions_path, started_at:$started_at}')
+
+if [[ -f "$CYCLE_FILE" ]]; then
+  CYCLE_TMP=$(mktemp)
+  jq --argjson round "$ROUND_ENTRY" --arg now "$NOW" \
+    '.rounds += [$round + {round: ((.rounds | length) + 1)}] | .updated_at = $now' \
+    "$CYCLE_FILE" > "$CYCLE_TMP" && mv "$CYCLE_TMP" "$CYCLE_FILE"
+else
+  jq -n \
+    --arg cycle_id "$CYCLE_ID" \
+    --arg repo_root "$REPO_ROOT" \
+    --arg now "$NOW" \
+    --argjson round "$ROUND_ENTRY" \
+    '{cycle_id:$cycle_id, repo_root:$repo_root, created_at:$now, updated_at:$now, rounds:[($round + {round:1})]}' \
+    > "$CYCLE_FILE"
+fi
+echo "review-panel: cycle $CYCLE_ID — recorded round at $CYCLE_FILE" >&2
 
 echo "$PANEL_ID"

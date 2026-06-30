@@ -117,6 +117,64 @@ else
   fail "wait-panel missing 'next baseline: tree:<hash>' line"
 fi
 
+# ── cycle-state file ─────────────────────────────────────────────────────────
+# review-panel records each round in a durable per-cycle file so a fresh agent
+# (post-compaction) recovers panel-ids, baselines, and disposition paths without
+# holding them in working memory.
+CYCLE_ID=$(jq -r '.cycle_id // empty' "$MANIFEST" 2>/dev/null)
+CYCLE_FILE="$HOME/.orchestra/cycles/$CYCLE_ID.json"
+
+# Assertion C1: the manifest records the cycle id.
+if [[ -n "$CYCLE_ID" ]]; then
+  ok "manifest records cycle_id"
+else
+  fail "manifest missing cycle_id"
+fi
+
+# Assertion C2: round 1 created the cycle file with one round entry for this panel.
+if [[ -f "$CYCLE_FILE" ]] \
+  && [[ "$(jq -r '.rounds | length' "$CYCLE_FILE" 2>/dev/null)" == "1" ]] \
+  && [[ "$(jq -r '.rounds[0].panel_id' "$CYCLE_FILE" 2>/dev/null)" == "$PANEL_ID" ]] \
+  && [[ "$(jq -r '.rounds[0].round' "$CYCLE_FILE" 2>/dev/null)" == "1" ]]; then
+  ok "cycle file created with round 1 entry"
+else
+  fail "cycle file missing or round-1 entry wrong: $(cat "$CYCLE_FILE" 2>/dev/null)"
+fi
+
+# Assertion C3: the round entry carries the data a recap needs.
+if [[ "$(jq -r '.repo_root' "$CYCLE_FILE" 2>/dev/null)" == "$REPO" ]] \
+  && [[ "$(jq -r '.rounds[0].reviewed_tree' "$CYCLE_FILE" 2>/dev/null)" == "$REVIEWED_TREE" ]] \
+  && [[ "$(jq -r '.rounds[0].dispositions_path' "$CYCLE_FILE" 2>/dev/null)" == "$HOME/.orchestra/panels/$PANEL_ID/dispositions.json" ]]; then
+  ok "cycle round records repo_root, reviewed_tree, dispositions_path"
+else
+  fail "cycle round entry missing recap fields: $(cat "$CYCLE_FILE" 2>/dev/null)"
+fi
+
+# Assertion C4: wait-panel surfaces the cycle id on success.
+if grep -q "^cycle: $CYCLE_ID$" <<<"$OUT"; then
+  ok "wait-panel prints cycle id on success"
+else
+  fail "wait-panel missing 'cycle: <id>' line"
+fi
+
+# Assertion C5: round 2 (--cycle <id>) appends a second round to the SAME file.
+printf 'package main\n\n// round 2 change\nfunc main(){}\n' > "$REPO/main.go"
+git -C "$REPO" add main.go
+PANEL_ID_R2=$(
+  REVIEW_PIPELINE_CODEX_JOB="$WORK/stub-codex" \
+  REVIEW_PIPELINE_CLAUDE_JOB="$WORK/stub-claude" \
+  "$REVIEW_PANEL" --repo-root "$REPO" --scope "tree:$REVIEWED_TREE" \
+  --cycle "$CYCLE_ID" --packet "$PACKET" --name smoke-r2 2>/dev/null
+)
+if [[ "$(jq -r '.rounds | length' "$CYCLE_FILE" 2>/dev/null)" == "2" ]] \
+  && [[ "$(jq -r '.rounds[1].panel_id' "$CYCLE_FILE" 2>/dev/null)" == "$PANEL_ID_R2" ]] \
+  && [[ "$(jq -r '.rounds[1].round' "$CYCLE_FILE" 2>/dev/null)" == "2" ]] \
+  && [[ "$(jq -r '.rounds[1].scope' "$CYCLE_FILE" 2>/dev/null)" == "tree:$REVIEWED_TREE" ]]; then
+  ok "round 2 (--cycle) appends to the same cycle file"
+else
+  fail "round 2 did not append correctly: $(cat "$CYCLE_FILE" 2>/dev/null)"
+fi
+
 # Assertion 25-27: wait-panel requires a '## Trace log' header in final.md.
 make_trace_panel() {  # $1=panel-id  $2=claude-final-content
   local pid="$1" body="$2"

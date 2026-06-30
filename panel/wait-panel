@@ -17,7 +17,9 @@
 # table to stdout. On success (exit 0), also prints a "reviews ready — …" block
 # with one "<reviewer> <path-to-final.md>" line per reviewer, then a
 # "next baseline: tree:<hash>" line (the manifest's reviewed_tree — copy it
-# into the next round's --scope). Exits:
+# into the next round's --scope), then a "cycle: <cycle-id>" line (pass it as
+# --cycle on the next round so review-panel appends to the same cycle record).
+# Exits:
 #   0 — both reviewer jobs passed validation
 #   1 — at least one reviewer failed (non-zero exit, empty final.md, or invalid)
 #   2 — bad usage / missing manifest
@@ -111,6 +113,10 @@ if [[ "$FAIL" -eq 0 ]]; then
   REVIEWED_TREE=$(jq -r '.reviewed_tree // empty' "$MANIFEST")
   if [[ -n "$REVIEWED_TREE" ]]; then
     echo "next baseline: tree:$REVIEWED_TREE"
+  fi
+  CYCLE_ID=$(jq -r '.cycle_id // empty' "$MANIFEST")
+  if [[ -n "$CYCLE_ID" ]]; then
+    echo "cycle: $CYCLE_ID"
   fi
 fi
 

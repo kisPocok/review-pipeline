@@ -16,6 +16,7 @@ set -euo pipefail
 install -d -m 700 \
   "$HOME/.orchestra/markers" \
   "$HOME/.orchestra/panels" \
+  "$HOME/.orchestra/cycles" \
   "$HOME/.orchestra/jobs/claude" \
   "$HOME/.orchestra/jobs/codex"
 

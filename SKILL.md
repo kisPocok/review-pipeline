@@ -17,9 +17,9 @@ A map of the flow — **orientation only, not an action list.** Your first *acti
    - **Non-trivial** → run the review loop:
      1. Write the shared packet (once per cycle).
      2. Fire the panel — round 1 `--scope staged`; round 2+ `--scope tree:<previous round's pre-fix tree>`.
-     3. Wait for both reviewers; validate each `final.md`.
+     3. Wait for both reviewers; validate each `final.md`; surface a one-line per-reviewer findings summary to the user.
      4. Reconcile both reviews; assign a disposition to every finding.
-     5. Nothing to fix → write the marker, retry the commit. **Done.** Otherwise apply fixes and re-stage; the next round's baseline is the `next baseline:` line wait-panel printed.
+     5. Nothing to fix → recap all findings to the user, write the marker, retry the commit. **Done.** Otherwise apply fixes and re-stage; the next round's baseline is the `next baseline:` line wait-panel printed.
      6. Round < 3 → loop to step 2. Round == 3 → surface the severity table and ask the user.
 
 ## ⛔ FIRST ACTION — Pre-flight permission warm-up (DO NOT SKIP)
@@ -96,13 +96,12 @@ A "cycle" is the sequence of rounds (panel → fix → panel → fix → ...) ne
 - **Round 1** reviews the full diff (`--scope staged`, the default). This is the *original* feature being reviewed.
 - **Round 2+** reviews **only the previous round's fix delta** — `--scope tree:<the tree round N-1 reviewed>`. `review-panel` records the tree it reviewed in the manifest (`reviewed_tree`, captured at fire time — before any fixes), and `wait-panel` prints it as a literal `next baseline: tree:<hash>` line on success. The diff is then exactly the fixes that round applied, so already-reviewed code is not re-flagged.
 
-You will need to track in-session, per cycle:
+**Cycle state is persisted for you.** `review-panel` writes a durable per-cycle record at `~/.orchestra/cycles/<cycle-id>.json` — round 1 creates it, every later round appends. Each round entry holds its `panel_id`, `scope`, `reviewed_tree` (the next round's baseline), and `dispositions_path`. You do **not** track this in your head:
 
-- An array of panel-ids, one per round, in order
-- The `next baseline: tree:<hash>` line from each round's wait-panel output — round N+1's `--scope` value
-- For each panel-id, the path to its `dispositions.json` (written by you in 2B.7)
+- **Round 1** — fire without `--cycle`; `review-panel` generates the cycle-id. `wait-panel` prints it on success as a `cycle: <cycle-id>` line. Record that one id (in your TodoList or a scratch note).
+- **Round 2+** — pass `--cycle <cycle-id>` so the round is appended to the same record. Take each round's `--scope` from the previous round's `next baseline: tree:<hash>` line, exactly as before.
 
-Use your TodoList (or scratch notes — the harness allows it) to hold this. There is no persistent cycle state file; the data is derivable from `~/.orchestra/panels/<panel-id>/` for any panel-id you remember.
+If context is lost mid-cycle, recover by reading `~/.orchestra/cycles/<cycle-id>.json` (or `ls -t ~/.orchestra/cycles/` and match `repo_root`): it lists every round's panel-id, baseline, and disposition path.
 
 ### 2B.3 — Fire the panel
 
@@ -122,11 +121,12 @@ PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
 PANEL_ID=$(~/.claude/skills/review-pipeline/panel/review-panel \
   --repo-root <effective_cwd> \
   --scope "tree:$BASELINE_TREE" \
+  --cycle "$CYCLE_ID" \
   --packet /tmp/review-pipeline-packet-<slug>.md \
   --name <short-slug>-r<N>)
 ```
 
-Where `$BASELINE_TREE` is the hash from the previous round's `next baseline: tree:<hash>` line (printed by wait-panel; also in that round's manifest as `reviewed_tree`). Do not recompute it with `git write-tree` yourself — by fix time the index has moved on. `review-panel` diffs `<BASELINE_TREE>..<current-write-tree>`; since the index now carries the previous round's fixes, that diff is exactly those fixes (plus any incidental staged changes since).
+Where `$CYCLE_ID` is the `cycle: <cycle-id>` line from round 1's wait-panel output (so this round appends to the same cycle record), and `$BASELINE_TREE` is the hash from the previous round's `next baseline: tree:<hash>` line (printed by wait-panel; also in that round's manifest as `reviewed_tree`). Do not recompute it with `git write-tree` yourself — by fix time the index has moved on. `review-panel` diffs `<BASELINE_TREE>..<current-write-tree>`; since the index now carries the previous round's fixes, that diff is exactly those fixes (plus any incidental staged changes since).
 
 `review-panel` fires both reviewers (one `claude-job`, one `codex-job`) in parallel and prints the panel-id. The manifest lives at `~/.orchestra/panels/$PANEL_ID/manifest.json` under a `reviewers` object (`claude`, `codex`), each with its job-id. The manifest's `scope` field records the round's review scope (e.g., `tree:abc123…`) for audit.
 
@@ -144,7 +144,7 @@ Behavior:
 - Polls every 2s, logging only on state change (so stderr stays ~7 lines total regardless of total wait time).
 - Validates: `exit_code` is `0`, `final.md` non-empty, contains either a severity header (`## Critical|High|Medium|Low`) or the literal `No findings.` sentinel, and carries the `## Trace log` header the reviewer protocol mandates.
 - Exits `0` only if both reviewers pass. Non-zero exit → surface the summary table to the user; do **not** proceed to reconciliation.
-- On success, prints the two `final.md` paths (one per reviewer) — use those in 2B.5 — and a final `next baseline: tree:<hash>` line. Record that line; it is the `--scope` value if a round N+1 fires (2B.3).
+- On success, prints the two `final.md` paths (one per reviewer) — use those in 2B.5 — a `next baseline: tree:<hash>` line (the `--scope` value if a round N+1 fires, 2B.3), and a `cycle: <cycle-id>` line. Record both; the cycle-id is the `--cycle` value for every later round.
 
 **If you have parallel work to do** (drafting the PR description, planning the next step), start that work after firing the panel. You'll be notified automatically when the background task completes — do NOT fire `ScheduleWakeup` for this.
 
@@ -153,6 +153,14 @@ Behavior:
 `wait-panel` (2B.4) already printed the two `final.md` paths on success. **Open each one with the Read tool** (not Bash) — they live under `~/.orchestra/`, which `Read(~/.orchestra/**)` allows, so neither prompts.
 
 > ⛔ Do **not** resolve the paths yourself with a shell pipeline like `CJ=$(jq … manifest.json); cat …/$CJ/final.md`. Command substitution (`$(…)`) and variable expansion (`$CJ`) trip Claude Code's `simple_expansion` analyzer, forcing a permission prompt that **no `allow` entry can suppress** — the dynamic command can't be statically matched. The paths from `wait-panel` are literal; just Read them.
+
+**Surface a one-line findings summary to the user the moment you've read both `final.md` files** — before you start reconciling. One line, per reviewer, with the severity counts, e.g.:
+
+```
+Round 2 reviews in — Claude: 2 high, 3 medium · Codex: 1 high, 4 medium, 2 low
+```
+
+If a reviewer returned `No findings.`, say so (`Codex: no findings`). This is the only signal the user gets that the round landed and what it surfaced; never reconcile silently.
 
 You reconcile the two reviews yourself — no automated reconciliation step:
 
@@ -205,7 +213,7 @@ It validates every entry (finding_id `F###`, severity, outcome, non-empty reason
 
 **`verdict: GATE — N unfixed critical/high; ask the user`** — a critical or high finding you decided *not* to fix (`acknowledged` or `false_positive`) needs the user's sign-off before anything else, including any marker. You may be right, but you are also the author of the change being reviewed; the user audits that call before it ships silently. Surface each such finding (id, severity, outcome, your reason) via `AskUserQuestion` with options per finding-set: **Accept and ship** (keep the disposition, proceed), **Fix this round** (flip to `fixed`, proceed to 2B.9), or **Defer to a tracked follow-up** (keep `acknowledged`, add the tracker reference to `reason`). After the answer (and any disposition edits), re-run `check-dispositions` and act on the new verdict. Low/medium non-fix dispositions do not gate — the dispositions file records them for audit.
 
-**`verdict: nothing to fix — write the marker and retry the commit`** → no fixes to apply. Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
+**`verdict: nothing to fix — write the marker and retry the commit`** → no fixes to apply. Recap all findings to the user (see **On cycle completion**). Write the marker for the current staged tree (`~/.claude/skills/review-pipeline/panel/write-marker <effective_cwd> [git globals]`). **DONE.** Retry the commit; the hook will consume the marker. The dispositions file records what you acknowledged or dismissed.
 
 **`verdict: LOW-only fixes — surface to the user`** — every `outcome: fixed` finding is `severity: low`; STOP and use `AskUserQuestion` with three options:
   1. **Acknowledge and ship.** Change those LOW findings' dispositions from `fixed` to `acknowledged` (with a `reason` you write per finding), write the marker, retry the commit. (Recommended when the LOWs are test-tightening or comment fixes.)
@@ -246,11 +254,11 @@ The pre-fix marker (if any) is irrelevant — the tree has changed. Round counte
 
 ### 2B.11 — MAX_ROUNDS severity surface
 
-When you hit MAX_ROUNDS, the user needs to choose: ship, defer, or explicitly override the cap. Give them the data to decide. Build a per-round severity-and-outcome table by walking each panel-id in your cycle state:
+When you hit MAX_ROUNDS, the user needs to choose: ship, defer, or explicitly override the cap. Give them the data to decide. Build a per-round severity-and-outcome table by walking each round in the cycle record (`~/.orchestra/cycles/$CYCLE_ID.json`), which lists every panel-id in order:
 
 ```bash
 ROUND=0
-for panel_id in <your-list-of-panel-ids>; do
+for panel_id in $(jq -r '.rounds[].panel_id' ~/.orchestra/cycles/$CYCLE_ID.json); do
   ROUND=$((ROUND + 1))
   fpath=~/.orchestra/panels/$panel_id/dispositions.json
   if [ ! -f "$fpath" ]; then continue; fi
@@ -286,6 +294,25 @@ Then ask the user with `AskUserQuestion`:
 4. **Continue past MAX_ROUNDS.** Apply the remaining fixes (per 2B.9), re-stage (per 2B.10), then refire one more round with the last wait-panel's `next baseline: tree:<hash>` as `--scope` (per 2B.3). The MAX_ROUNDS cap effectively becomes a soft cap once the user opts in; surface the severity table again after the next round and ask the same question. Only choose this if a HIGH/CRITICAL is in the remaining list — if the table shows zero HIGH+CRITICAL, this option is almost always wrong.
 
 Include the list of `acknowledged` and `false_positive` dispositions across all rounds in your response so the user can audit the decisions.
+
+## On cycle completion — recap all findings to the user
+
+The moment the cycle closes — at **every** exit where you write the final marker and retry the commit (the `nothing to fix` verdict in 2B.8, the LOW-only ship paths, and the MAX_ROUNDS ship/defer choices in 2B.11) — present a consolidated recap of every finding raised across **all** rounds of the cycle before (or alongside) retrying the commit. The per-round one-liners (2B.5) scroll away; this is the single place the user sees the whole picture of what the panel caught and what you did about it.
+
+Walk every round in the cycle record (`jq -r '.rounds[].panel_id' ~/.orchestra/cycles/$CYCLE_ID.json`) and read each round's `dispositions.json`, then surface a compact table — one row per finding, grouped by round:
+
+```
+Cycle complete — 3 rounds, 11 findings
+
+Round | ID   | Sev  | Outcome        | Summary
+------|------|------|----------------|------------------------------------------
+  1   | F001 | high | fixed          | input length cap added in handler.go:42
+  1   | F002 | med  | acknowledged   | pre-existing; tracked in SECURITY-NOTES.md
+  2   | F003 | high | fixed          | nil-guard on session lookup
+  3   | F004 | low  | false_positive | guard already exists at routes.go:18
+```
+
+Always spell out the `acknowledged` and `false_positive` rows in full — those are the decisions the user is implicitly trusting you on as they ship. The trivial-bypass path (2A) has no findings; a one-line "skipped panel (trivial)" note already covers it.
 
 ## Async handling rules
 
