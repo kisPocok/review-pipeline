@@ -14,7 +14,7 @@
 #   prompt.txt, events.jsonl, final.md, exit_code, done_at, pid, stderr.log, meta.json
 #
 # Tier matrix:
-#   strongest    = gpt-5.5       effort=high     (review default — local codex caps at high)
+#   strongest    = gpt-5.6-sol   effort=high     (review default)
 #   strong       = gpt-5.5       effort=high
 #   standard     = gpt-5.5       effort=medium
 #   light        = gpt-5.4-mini  effort=low
@@ -54,7 +54,7 @@ done
 [[ -d "$REPO_ROOT"   ]] || { echo "codex-job: --repo-root required" >&2; exit 2; }
 
 case "$TIER" in
-  strongest)   MODEL="gpt-5.5";       EFFORT="high"   ;;
+  strongest)   MODEL="gpt-5.6-sol";   EFFORT="high"   ;;
   strong)      MODEL="gpt-5.5";       EFFORT="high"   ;;
   standard)    MODEL="gpt-5.5";       EFFORT="medium" ;;
   light)       MODEL="gpt-5.4-mini";  EFFORT="low"    ;;
