@@ -54,6 +54,15 @@ func run(stdin io.Reader, stderr io.Writer) int {
 		return 0
 	}
 
+	// A shell-dependent path form (mixed-quoted tilde, ~user) means the hook
+	// cannot know which directory the commit targets. Block WITHOUT touching
+	// any marker: computing a hash from a guessed path would let a decoy repo
+	// at the literal path authorize an unreviewed commit elsewhere.
+	if result.CwdUnresolved {
+		fmt.Fprintln(stderr, ambiguousCwdMessage())
+		return 2
+	}
+
 	hash, err := writeTree(result.EffectiveCwd, result.GitGlobals)
 	if err != nil || hash == "" {
 		// Could not compute a hash (no index, git unavailable, etc.). Block
@@ -116,6 +125,21 @@ func defaultMarkerDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".orchestra", "markers"), nil
+}
+
+func ambiguousCwdMessage() string {
+	var b strings.Builder
+	b.WriteString("review-pipeline hook: a `git commit` uses an ambiguous working directory.\n\n")
+	b.WriteString("The hook cannot determine which directory the commit targets: the\n")
+	b.WriteString("cd / git -C / --git-dir / --work-tree value carries a tilde whose\n")
+	b.WriteString("expansion depends on the executing shell (mixed quoting like ~\"/x\"\n")
+	b.WriteString("diverges between bash and zsh; ~user depends on user lookup), the\n")
+	b.WriteString("command manipulates HOME, or nesting is too deep to analyze. No\n")
+	b.WriteString("marker will be computed or consumed for this command.\n\n")
+	b.WriteString("❌ STOP. Re-issue the command with an explicit path — an absolute path,\n")
+	b.WriteString("or a plain unquoted ~/... without HOME manipulation — then follow the\n")
+	b.WriteString("normal review flow.\n")
+	return b.String()
 }
 
 func blockMessage(cwd string, globals []string, hash, extra string) string {

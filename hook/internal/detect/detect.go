@@ -4,6 +4,7 @@
 package detect
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -22,6 +23,15 @@ type Result struct {
 	// GitGlobals are git global args (--git-dir, --work-tree) captured from
 	// the commit segment, ordered for splicing before a `write-tree` call.
 	GitGlobals []string
+	// CwdUnresolved reports that the commit's directory is unknowable: a
+	// cwd-affecting value (cd target, git -C, --git-dir/--work-tree) uses a
+	// form whose meaning depends on the executing shell (mixed-quoted tilde,
+	// ~user, any tilde once the command manipulates HOME), or nesting
+	// exceeded the analysis depth. The caller must block WITHOUT computing
+	// or consuming any tree hash: a literal fallback is itself a resolution,
+	// and a decoy repo at the literal path could be used to authorize the
+	// wrong tree.
+	CwdUnresolved bool
 }
 
 // Analyze parses cmd as a shell command and reports a Result.
@@ -30,7 +40,7 @@ type Result struct {
 // starting point before any `cd` or `git -C` is applied. Relative paths in
 // `cd` are resolved against the current cwd.
 func Analyze(cmd, baseCwd string) Result {
-	return analyze(cmd, baseCwd, 0)
+	return analyze(cmd, baseCwd, 0, false)
 }
 
 const maxRecursion = 4
@@ -64,9 +74,9 @@ var (
 		"--reuse-message": true, "--reedit-message": true,
 		"--fixup": true, "--squash": true,
 		"--template": true, "--pathspec-from-file": true,
-		"--trailer":          true,
-		"-u":                 true,
-		"--untracked-files":  true,
+		"--trailer":         true,
+		"-u":                true,
+		"--untracked-files": true,
 	}
 	commitOptionalValueOpts = map[string]bool{
 		"-S": true, "--gpg-sign": true,
@@ -76,21 +86,33 @@ var (
 	}
 )
 
-func analyze(cmd, baseCwd string, depth int) Result {
+// analyze walks cmd's statements for a real git commit. homeMutated carries
+// a HOME manipulation from an enclosing command into nested scripts, whose
+// own text can't reveal it; any mutation makes every tilde expansion
+// shell-dependent.
+func analyze(cmd, baseCwd string, depth int, homeMutated bool) Result {
 	if depth > maxRecursion {
-		// Fail-closed on pathological nesting.
-		return Result{IsGitCommit: true, EffectiveCwd: baseCwd}
+		// Fail-closed on pathological nesting: the commit's directory is
+		// unknowable, so no tree may be hashed or marker consumed.
+		return Result{IsGitCommit: true, CwdUnresolved: true}
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(cmd), "")
 	if err != nil {
 		return Result{}
 	}
+	if !homeMutated {
+		homeMutated = mutatesHome(file)
+	}
 
 	cwd := baseCwd
+	cwdAmbiguous := false
 	for _, stmt := range flattenSameLevel(file.Stmts) {
 		// First, check for a real git commit nested inside CmdSubst / Subshell.
 		// Those don't update the outer cwd but DO count for detection.
-		if r := findNested(stmt, cwd, depth); r.IsGitCommit {
+		if r := findNested(stmt, cwd, depth, homeMutated); r.IsGitCommit {
+			if cwdAmbiguous {
+				r.CwdUnresolved = true
+			}
 			return r
 		}
 
@@ -114,7 +136,10 @@ func analyze(cmd, baseCwd string, depth int) Result {
 
 		// Shell consumers: recurse into their script argument.
 		if shellConsumers[head] {
-			if r := recurseShellConsumer(head, args, stmt, cwd, depth); r.IsGitCommit {
+			if r := recurseShellConsumer(head, args, stmt, cwd, depth, homeMutated); r.IsGitCommit {
+				if cwdAmbiguous {
+					r.CwdUnresolved = true
+				}
 				return r
 			}
 			continue
@@ -125,7 +150,15 @@ func analyze(cmd, baseCwd string, depth int) Result {
 		// For non-shell-consumer commands with heredocs, do nothing.
 
 		if head == "cd" && len(args) >= 2 {
-			cwd = resolveCwd(args[1], cwd)
+			if tildeUnresolved(call.Args[wordOffset+1]) ||
+				(homeMutated && tildeLed(call.Args[wordOffset+1])) {
+				cwdAmbiguous = true
+			} else {
+				if filepath.IsAbs(args[1]) {
+					cwdAmbiguous = false
+				}
+				cwd = resolveCwd(args[1], cwd)
+			}
 			continue
 		}
 
@@ -141,13 +174,25 @@ func analyze(cmd, baseCwd string, depth int) Result {
 		// a subcommand hidden behind one is invisible to the checks below.
 		// Like the maxRecursion case, that uncertainty fails closed.
 		if expansionHidesSubcommand(call.Args, wordOffset, subIdx) {
-			return Result{IsGitCommit: true, EffectiveCwd: cwd}
+			return Result{IsGitCommit: true, EffectiveCwd: cwd, CwdUnresolved: cwdAmbiguous}
 		}
 		if subIdx >= len(args) || args[subIdx] != "commit" {
 			continue
 		}
 		if !commitIsReal(args[subIdx+1:]) {
 			continue
+		}
+
+		unresolved := cwdAmbiguous
+		if gitC != "" && filepath.IsAbs(gitC) {
+			// An absolute -C overrides any ambiguity accumulated via cd.
+			unresolved = false
+		}
+		if gitValueUnresolved(call.Args, wordOffset, args, subIdx, homeMutated) {
+			unresolved = true
+		}
+		if unresolved {
+			return Result{IsGitCommit: true, EffectiveCwd: cwd, CwdUnresolved: true}
 		}
 
 		effective := cwd
@@ -196,7 +241,7 @@ func topLevelCall(stmt *syntax.Stmt) *syntax.CallExpr {
 
 // findNested walks stmt's tree and looks for a real git commit inside
 // CmdSubst or Subshell nodes. Detection-only — does not propagate cwd.
-func findNested(stmt *syntax.Stmt, cwd string, depth int) Result {
+func findNested(stmt *syntax.Stmt, cwd string, depth int, homeMutated bool) Result {
 	var found Result
 	syntax.Walk(stmt, func(n syntax.Node) bool {
 		if found.IsGitCommit {
@@ -204,7 +249,7 @@ func findNested(stmt *syntax.Stmt, cwd string, depth int) Result {
 		}
 		switch x := n.(type) {
 		case *syntax.CmdSubst:
-			r := analyzeStmts(x.Stmts, cwd, depth+1)
+			r := analyzeStmts(x.Stmts, cwd, depth+1, homeMutated)
 			if r.IsGitCommit {
 				r.EffectiveCwd = cwd
 				r.GitGlobals = nil
@@ -212,7 +257,7 @@ func findNested(stmt *syntax.Stmt, cwd string, depth int) Result {
 			}
 			return false
 		case *syntax.Subshell:
-			r := analyzeStmts(x.Stmts, cwd, depth+1)
+			r := analyzeStmts(x.Stmts, cwd, depth+1, homeMutated)
 			if r.IsGitCommit {
 				r.EffectiveCwd = cwd
 				r.GitGlobals = nil
@@ -220,7 +265,7 @@ func findNested(stmt *syntax.Stmt, cwd string, depth int) Result {
 			}
 			return false
 		case *syntax.ProcSubst:
-			r := analyzeStmts(x.Stmts, cwd, depth+1)
+			r := analyzeStmts(x.Stmts, cwd, depth+1, homeMutated)
 			if r.IsGitCommit {
 				r.EffectiveCwd = cwd
 				r.GitGlobals = nil
@@ -234,9 +279,9 @@ func findNested(stmt *syntax.Stmt, cwd string, depth int) Result {
 }
 
 // analyzeStmts re-runs the analyzer on an already-parsed list of statements.
-func analyzeStmts(stmts []*syntax.Stmt, baseCwd string, depth int) Result {
+func analyzeStmts(stmts []*syntax.Stmt, baseCwd string, depth int, homeMutated bool) Result {
 	if depth > maxRecursion {
-		return Result{IsGitCommit: true, EffectiveCwd: baseCwd}
+		return Result{IsGitCommit: true, CwdUnresolved: true}
 	}
 	// Re-print to source so we can use the same analyze() path uniformly.
 	var b strings.Builder
@@ -247,16 +292,16 @@ func analyzeStmts(stmts []*syntax.Stmt, baseCwd string, depth int) Result {
 		}
 		b.WriteString("\n")
 	}
-	return analyze(b.String(), baseCwd, depth)
+	return analyze(b.String(), baseCwd, depth, homeMutated)
 }
 
 // recurseShellConsumer handles bash/sh/zsh/eval/source/exec/. by extracting
 // the script argument (after -c or via heredoc) and re-analyzing it.
-func recurseShellConsumer(head string, args []string, stmt *syntax.Stmt, cwd string, depth int) Result {
+func recurseShellConsumer(head string, args []string, stmt *syntax.Stmt, cwd string, depth int, homeMutated bool) Result {
 	// -c <script>
 	for i := 1; i < len(args)-1; i++ {
 		if args[i] == "-c" {
-			r := analyze(args[i+1], cwd, depth+1)
+			r := analyze(args[i+1], cwd, depth+1, homeMutated)
 			if r.IsGitCommit {
 				r.EffectiveCwd = cwd
 				r.GitGlobals = nil
@@ -267,7 +312,7 @@ func recurseShellConsumer(head string, args []string, stmt *syntax.Stmt, cwd str
 	// eval joins all remaining args as one shell script.
 	if head == "eval" && len(args) > 1 {
 		joined := strings.Join(args[1:], " ")
-		r := analyze(joined, cwd, depth+1)
+		r := analyze(joined, cwd, depth+1, homeMutated)
 		if r.IsGitCommit {
 			r.EffectiveCwd = cwd
 			r.GitGlobals = nil
@@ -283,7 +328,7 @@ func recurseShellConsumer(head string, args []string, stmt *syntax.Stmt, cwd str
 			continue
 		}
 		body := wordLit(rd.Hdoc)
-		r := analyze(body, cwd, depth+1)
+		r := analyze(body, cwd, depth+1, homeMutated)
 		if r.IsGitCommit {
 			r.EffectiveCwd = cwd
 			r.GitGlobals = nil
@@ -443,13 +488,140 @@ func resolveCwd(target, base string) string {
 	return filepath.Clean(filepath.Join(base, target))
 }
 
-// wordsToStrings extracts the literal text of each *syntax.Word.
+// wordsToStrings extracts the literal text of each *syntax.Word, applying
+// tilde expansion the way the shell does for argv words.
 func wordsToStrings(words []*syntax.Word) []string {
 	out := make([]string, 0, len(words))
 	for _, w := range words {
-		out = append(out, wordLit(w))
+		out = append(out, tildeExpand(wordLit(w), w))
 	}
 	return out
+}
+
+// tildeUnresolved reports whether w begins with an unquoted literal tilde
+// whose expansion depends on the executing shell: mixed-quoting forms like
+// ~"/x" (bash keeps literal, zsh expands) and ~user forms (bash keeps
+// literal for unknown users, zsh expands or errors). Clean forms — a bare ~
+// as the whole word, or a ~/ prefix carried in the first literal part — are
+// resolved identically by every shell and are not flagged; fully quoted
+// tildes stay literal everywhere and are not flagged either.
+func tildeUnresolved(w *syntax.Word) bool {
+	if w == nil || len(w.Parts) == 0 {
+		return false
+	}
+	first, ok := w.Parts[0].(*syntax.Lit)
+	if !ok || !strings.HasPrefix(first.Value, "~") {
+		return false
+	}
+	if first.Value == "~" && len(w.Parts) == 1 {
+		return false
+	}
+	return !strings.HasPrefix(first.Value, "~/")
+}
+
+// gitValueUnresolved reports whether any cwd-affecting git global value
+// (-C, --git-dir, --work-tree) before the subcommand carries a
+// shell-dependent tilde form. With homeMutated, every tilde-led value is
+// shell-dependent: the analyzer's expansion and the shell's disagree.
+func gitValueUnresolved(words []*syntax.Word, offset int, args []string, subIdx int, homeMutated bool) bool {
+	for i := 1; i < subIdx && i < len(args); i++ {
+		switch args[i] {
+		case "-C", "--git-dir", "--work-tree":
+			if wi := offset + i + 1; wi < len(words) {
+				if tildeUnresolved(words[wi]) || (homeMutated && tildeLed(words[wi])) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// tildeLed reports whether w starts with an unquoted literal tilde of any
+// form — the words tildeExpand may act on or tildeUnresolved may flag.
+func tildeLed(w *syntax.Word) bool {
+	if w == nil || len(w.Parts) == 0 {
+		return false
+	}
+	first, ok := w.Parts[0].(*syntax.Lit)
+	return ok && strings.HasPrefix(first.Value, "~")
+}
+
+// mutatesHome reports whether the parsed command manipulates HOME anywhere:
+// an assignment (standalone, prefix, export/declare), `unset HOME`, an
+// `env`-style `HOME=` word, or env flags that drop it (-i, -u HOME). Scope
+// and ordering are not modeled — any mutation poisons the whole command,
+// which can only over-block (fail closed).
+func mutatesHome(file *syntax.File) bool {
+	found := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *syntax.Assign:
+			if x.Name != nil && x.Name.Value == "HOME" {
+				found = true
+			}
+		case *syntax.CallExpr:
+			lits := make([]string, 0, len(x.Args))
+			for _, w := range x.Args {
+				lits = append(lits, wordLit(w))
+			}
+			if len(lits) == 0 {
+				break
+			}
+			head := filepath.Base(lits[0])
+			for i := 1; i < len(lits); i++ {
+				a := lits[i]
+				if head == "unset" && a == "HOME" {
+					found = true
+					break
+				}
+				if head == "env" && (a == "-i" ||
+					strings.HasPrefix(a, "HOME=") ||
+					(a == "-u" && i+1 < len(lits) && lits[i+1] == "HOME")) {
+					found = true
+					break
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// tildeExpand expands a leading unquoted tilde in lit to the user's home
+// directory, mirroring the shell's tilde expansion of argv words. Expansion
+// applies only to the unambiguous forms every shell agrees on: a bare `~`
+// that is the entire word, or a `~/` prefix carried unquoted in the word's
+// first literal part. Mixed-quoting forms like `~"/x"` diverge between
+// shells (bash keeps them literal, zsh expands), so they stay literal —
+// as do quoted tildes and ~user/~+/~- forms. Unexpanded values make the
+// caller's write-tree fail and the hook fail closed.
+func tildeExpand(lit string, w *syntax.Word) string {
+	if w == nil || len(w.Parts) == 0 {
+		return lit
+	}
+	first, ok := w.Parts[0].(*syntax.Lit)
+	if !ok {
+		return lit
+	}
+	expand := false
+	switch {
+	case lit == "~":
+		expand = len(w.Parts) == 1 && first.Value == "~"
+	case strings.HasPrefix(lit, "~/"):
+		expand = strings.HasPrefix(first.Value, "~/")
+	}
+	if !expand {
+		return lit
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return lit
+	}
+	return home + lit[1:]
 }
 
 // expansionHidesSubcommand reports whether shell expansions make the git

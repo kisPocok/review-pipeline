@@ -274,3 +274,275 @@ func stringSlicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestAnalyze_TildeExpansion checks that an unquoted leading tilde in cwd-
+// affecting positions expands to $HOME exactly where every shell would, that
+// forms all shells keep literal stay literal, and that forms whose meaning
+// depends on the executing shell (mixed quoting, ~user) are flagged
+// CwdUnresolved — a literal fallback there is itself a resolution, and a
+// decoy repo at the literal path could be used to authorize the wrong tree.
+func TestAnalyze_TildeExpansion(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+
+	tests := []struct {
+		name           string
+		cmd            string
+		baseCwd        string
+		wantCwd        string
+		wantUnresolved bool
+		wantGlobals    []string
+	}{
+		{
+			name:    "cd tilde-slash then commit",
+			cmd:     "cd ~/profile && git commit -m x",
+			baseCwd: "/repo",
+			wantCwd: "/home/tester/profile",
+		},
+		{
+			name:    "cd bare tilde then commit",
+			cmd:     "cd ~ && git commit -m x",
+			baseCwd: "/repo",
+			wantCwd: "/home/tester",
+		},
+		{
+			name:    "git -C tilde-slash commit",
+			cmd:     "git -C ~/profile commit -m x",
+			baseCwd: "/repo",
+			wantCwd: "/home/tester/profile",
+		},
+		{
+			name:    "single-quoted tilde stays literal",
+			cmd:     "cd '~/profile' && git commit -m x",
+			baseCwd: "/repo",
+			wantCwd: "/repo/~/profile",
+		},
+		{
+			name:    "double-quoted tilde stays literal",
+			cmd:     `cd "~/profile" && git commit -m x`,
+			baseCwd: "/repo",
+			wantCwd: "/repo/~/profile",
+		},
+		{
+			name:           "tilde-user form is unresolved",
+			cmd:            "cd ~other/profile && git commit -m x",
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+		{
+			name:        "work-tree separate-word tilde value expands",
+			cmd:         "git --work-tree ~/wt --git-dir /g/.git commit -m x",
+			baseCwd:     "/repo",
+			wantCwd:     "/repo",
+			wantGlobals: []string{"--work-tree", "/home/tester/wt", "--git-dir", "/g/.git"},
+		},
+		{
+			name:        "equals-joined tilde stays literal",
+			cmd:         "git --work-tree=~/wt commit -m x",
+			baseCwd:     "/repo",
+			wantCwd:     "/repo",
+			wantGlobals: []string{"--work-tree=~/wt"},
+		},
+		{
+			name:           "mixed quoting tilde-then-quoted-slash is unresolved",
+			cmd:            `cd ~"/x" && git commit -m x`,
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+		{
+			name:           "tilde-empty-quotes-slash is unresolved",
+			cmd:            `cd ~""/x && git commit -m x`,
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+		{
+			name:    "unquoted tilde-slash with later quoted part expands",
+			cmd:     `cd ~/"x" && git commit -m x`,
+			baseCwd: "/repo",
+			wantCwd: "/home/tester/x",
+		},
+		{
+			name:           "bare tilde followed by quoted part is unresolved",
+			cmd:            `cd ~"" && git commit -m x`,
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+		{
+			name:           "git -C mixed-quote tilde is unresolved",
+			cmd:            `git -C ~"/x" commit -m x`,
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+		{
+			name:           "work-tree separate-word tilde-user is unresolved",
+			cmd:            "git --work-tree ~other/wt commit -m x",
+			baseCwd:        "/repo",
+			wantUnresolved: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Analyze(tt.cmd, tt.baseCwd)
+			if !r.IsGitCommit {
+				t.Fatalf("Analyze(%q) IsGitCommit = false, want true", tt.cmd)
+			}
+			if r.CwdUnresolved != tt.wantUnresolved {
+				t.Errorf("Analyze(%q) CwdUnresolved = %v, want %v", tt.cmd, r.CwdUnresolved, tt.wantUnresolved)
+			}
+			if tt.wantUnresolved {
+				return
+			}
+			if r.EffectiveCwd != tt.wantCwd {
+				t.Errorf("Analyze(%q) EffectiveCwd = %q, want %q", tt.cmd, r.EffectiveCwd, tt.wantCwd)
+			}
+			if tt.wantGlobals != nil && !stringSlicesEqual(r.GitGlobals, tt.wantGlobals) {
+				t.Errorf("Analyze(%q) GitGlobals = %v, want %v", tt.cmd, r.GitGlobals, tt.wantGlobals)
+			}
+		})
+	}
+}
+
+// TestAnalyze_AmbiguityPropagation checks that an ambiguous cd poisons every
+// path that can detect a commit afterwards — subshells, command substitution,
+// shell consumers, expansion-hidden subcommands, and the recursion-depth
+// bail-out. Any of these returning a resolvable EffectiveCwd would let the
+// caller hash the base repo and consume its marker while the commit actually
+// runs in a shell-dependent directory.
+func TestAnalyze_AmbiguityPropagation(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+
+	tests := []struct {
+		name string
+		cmd  string
+	}{
+		{
+			name: "subshell commit after ambiguous cd",
+			cmd:  `cd ~"/x" && (git commit -m x)`,
+		},
+		{
+			name: "command-substitution commit after ambiguous cd",
+			cmd:  `cd ~"/x" && echo $(git commit -m x)`,
+		},
+		{
+			name: "shell-consumer commit after ambiguous cd",
+			cmd:  `cd ~"/x" && bash -c 'git commit -m x'`,
+		},
+		{
+			name: "eval commit after ambiguous cd",
+			cmd:  `cd ~"/x" && eval "git commit -m x"`,
+		},
+		{
+			name: "expansion-hidden subcommand after ambiguous cd",
+			cmd:  `cd ~"/x" && git $SUB -m x`,
+		},
+		{
+			name: "recursion-depth bail-out is unresolved",
+			cmd:  `( ( ( ( ( ( ( ( git commit -m x ) ) ) ) ) ) ) )`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Analyze(tt.cmd, "/repo")
+			if !r.IsGitCommit {
+				t.Fatalf("Analyze(%q) IsGitCommit = false, want true", tt.cmd)
+			}
+			if !r.CwdUnresolved {
+				t.Errorf("Analyze(%q) CwdUnresolved = false, want true (EffectiveCwd=%q would be hashed)", tt.cmd, r.EffectiveCwd)
+			}
+		})
+	}
+}
+
+// TestAnalyze_HomeMutation checks that a command manipulating HOME makes
+// every tilde-led cwd form unresolved: the analyzer expands tildes with the
+// hook process's home, but the executing shell would use the mutated value,
+// so the two can authorize different repositories.
+func TestAnalyze_HomeMutation(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+
+	tests := []struct {
+		name           string
+		cmd            string
+		wantUnresolved bool
+		wantCwd        string
+	}{
+		{
+			name:           "assignment then tilde cd",
+			cmd:            `HOME=/tmp/other; cd ~/repo && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "export then tilde cd",
+			cmd:            `export HOME=/tmp/other; cd ~/repo && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "unset then tilde cd",
+			cmd:            `unset HOME; cd ~/repo && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "assignment then bare-tilde cd",
+			cmd:            `HOME=/tmp/other; cd ~ && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "assignment then git -C tilde",
+			cmd:            `HOME=/tmp/other; git -C ~/repo commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "assignment outside inner tilde cd",
+			cmd:            `HOME=/tmp/other; bash -c 'cd ~/repo && git commit -m x'`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "env -u HOME shell consumer with tilde cd",
+			cmd:            `env -u HOME sh -c 'cd ~/repo && git commit -m x'`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "env HOME= shell consumer with tilde cd",
+			cmd:            `env HOME=/tmp/other sh -c 'cd ~/repo && git commit -m x'`,
+			wantUnresolved: true,
+		},
+		{
+			name:    "HOME prefix assignment without tilde stays resolved",
+			cmd:     `HOME=/tmp/other git commit -m x`,
+			wantCwd: "/repo",
+		},
+		{
+			name:    "HOME= argument to a non-env command stays resolved",
+			cmd:     `cd ~/repo && make HOME=/tmp/build && git commit -m x`,
+			wantCwd: "/home/tester/repo",
+		},
+		{
+			name:    "HOME= inside a commit message stays resolved",
+			cmd:     `cd ~/repo && git commit -m "HOME= handling fix"`,
+			wantCwd: "/home/tester/repo",
+		},
+		{
+			name:    "echoed HOME= text stays resolved",
+			cmd:     `echo HOME=/tmp; cd ~/repo && git commit -m x`,
+			wantCwd: "/home/tester/repo",
+		},
+		{
+			name:    "assignment with absolute cd stays resolved",
+			cmd:     `HOME=/tmp/other; cd /abs && git commit -m x`,
+			wantCwd: "/abs",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Analyze(tt.cmd, "/repo")
+			if !r.IsGitCommit {
+				t.Fatalf("Analyze(%q) IsGitCommit = false, want true", tt.cmd)
+			}
+			if r.CwdUnresolved != tt.wantUnresolved {
+				t.Errorf("Analyze(%q) CwdUnresolved = %v, want %v", tt.cmd, r.CwdUnresolved, tt.wantUnresolved)
+			}
+			if !tt.wantUnresolved && r.EffectiveCwd != tt.wantCwd {
+				t.Errorf("Analyze(%q) EffectiveCwd = %q, want %q", tt.cmd, r.EffectiveCwd, tt.wantCwd)
+			}
+		})
+	}
+}

@@ -168,3 +168,44 @@ func TestRun_RealCommitConsumeIsSingleUse(t *testing.T) {
 		t.Errorf("second attempt: exit=%d, want 2 (marker should be single-use)", code)
 	}
 }
+
+// TestRun_AmbiguousTilde_BlocksWithoutMarker encodes the decoy-repo bypass:
+// a shell-dependent path form must block outright. A real repo sits at the
+// literal path a naive resolution would compute (<repo>/~/x), with a valid
+// marker for ITS tree — that marker must survive untouched, proving the hook
+// never hashed or consumed anything for the ambiguous command.
+func TestRun_AmbiguousTilde_BlocksWithoutMarker(t *testing.T) {
+	repo, _ := initRepo(t)
+	markerDir := withMarkerDir(t)
+
+	decoyRepo := filepath.Join(repo, "~", "x")
+	if err := os.MkdirAll(decoyRepo, 0o700); err != nil {
+		t.Fatalf("mkdir decoy repo: %v", err)
+	}
+	mustGit(t, decoyRepo, "init", "-q")
+	mustGit(t, decoyRepo, "config", "user.email", "test@example.com")
+	mustGit(t, decoyRepo, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(decoyRepo, "decoy.txt"), []byte("decoy\n"), 0o600); err != nil {
+		t.Fatalf("write decoy file: %v", err)
+	}
+	mustGit(t, decoyRepo, "add", "decoy.txt")
+	decoyTree := strings.TrimSpace(mustGit(t, decoyRepo, "write-tree"))
+
+	decoyMarker := filepath.Join(markerDir, decoyTree)
+	if err := os.WriteFile(decoyMarker, nil, 0o600); err != nil {
+		t.Fatalf("write decoy marker: %v", err)
+	}
+
+	payload := fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"cd ~\"/x\" && git commit -m x"}}`, repo)
+	var stderr bytes.Buffer
+	code := run(strings.NewReader(payload), &stderr)
+	if code != 2 {
+		t.Fatalf("ambiguous tilde: exit=%d, want 2; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous") {
+		t.Errorf("stderr should explain the ambiguous path; got: %s", stderr.String())
+	}
+	if _, err := os.Stat(decoyMarker); err != nil {
+		t.Errorf("decoy marker must not be consumed on an ambiguous block: %v", err)
+	}
+}
