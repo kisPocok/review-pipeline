@@ -126,6 +126,9 @@ func TestAnalyze_ExpansionFailsClosed(t *testing.T) {
 			if !got.IsGitCommit {
 				t.Errorf("Analyze(%q) IsGitCommit = false; want true (fail closed)", tt.cmd)
 			}
+			if !got.CwdUnresolved {
+				t.Errorf("Analyze(%q) CwdUnresolved = false; want true (hidden argv can redirect cwd)", tt.cmd)
+			}
 		})
 	}
 
@@ -449,6 +452,214 @@ func TestAnalyze_AmbiguityPropagation(t *testing.T) {
 				t.Errorf("Analyze(%q) CwdUnresolved = false, want true (EffectiveCwd=%q would be hashed)", tt.cmd, r.EffectiveCwd)
 			}
 		})
+	}
+}
+
+// TestAnalyze_RuntimeCwdUnresolved checks that cwd sources the shell computes
+// at run time — expansions in cd targets or git -C/--git-dir/--work-tree
+// values, expansion-hidden subcommands, bare cd under a mutated HOME — are
+// flagged CwdUnresolved: the analyzer sees empty text where the shell will
+// substitute a real path, so any resolved fallback could hash and authorize
+// the wrong repository.
+func TestAnalyze_RuntimeCwdUnresolved(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+
+	tests := []struct {
+		name           string
+		cmd            string
+		wantUnresolved bool
+		wantCwd        string
+	}{
+		{
+			name:           "cd unquoted variable",
+			cmd:            `cd $DIR && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd quoted variable",
+			cmd:            `cd "$DIR" && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd partial expansion",
+			cmd:            `cd /srv/$APP && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd command substitution",
+			cmd:            `cd $(mktemp -d) && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:    "bare cd goes home",
+			cmd:     `cd && git commit -m x`,
+			wantCwd: "/home/tester",
+		},
+		{
+			name:           "bare cd with mutated HOME",
+			cmd:            `HOME=/tmp/other; cd && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "git -C quoted variable commit",
+			cmd:            `git -C "$DIR" commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "git --work-tree quoted variable commit",
+			cmd:            `git --work-tree "$WT" --git-dir /g/.git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "hidden subcommand plain",
+			cmd:            `git $SUB -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "hidden subcommand with -C",
+			cmd:            `git -C /other $SUB -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "hidden subcommand with mixed-quote -C",
+			cmd:            `git -C ~"/x" $SUB -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:    "absolute cd clears variable ambiguity",
+			cmd:     `cd $DIR; cd /abs && git commit -m x`,
+			wantCwd: "/abs",
+		},
+		{
+			name:    "single-quoted dollar stays literal",
+			cmd:     `cd '/x$y' && git commit -m x`,
+			wantCwd: "/x$y",
+		},
+		{
+			name:           "equals-joined git-dir with expansion",
+			cmd:            `git --git-dir=/g"$S"/.git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "equals-joined work-tree with expansion",
+			cmd:            `git --work-tree=/w"$S" --git-dir /g/.git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "expansion attached to option name",
+			cmd:            `git --git-dir"$SPEC" commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd bracket glob",
+			cmd:            `cd /tmp/r-[a] && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd question-mark glob",
+			cmd:            `cd /tmp/r-? && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd brace form",
+			cmd:            `cd /tmp/{x,y} && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "git -C bracket glob",
+			cmd:            `git -C /tmp/r-[a] commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:    "quoted glob stays literal",
+			cmd:     `cd '/tmp/r-[a]' && git commit -m x`,
+			wantCwd: "/tmp/r-[a]",
+		},
+		{
+			name:           "cd ansi-c quoted target",
+			cmd:            `cd $'/tmp/a\x2db' && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd locale-translated target",
+			cmd:            `cd $"/tmp/xyz" && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "equals-joined git-dir with ansi-c quote",
+			cmd:            `git --git-dir=$'/g\x2db/.git' commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "git -C ansi-c quoted value",
+			cmd:            `git -C $'/tmp/a\x2db' commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:    "cd double-dash then absolute target",
+			cmd:     `cd -- /abs && git commit -m x`,
+			wantCwd: "/abs",
+		},
+		{
+			name:    "cd double-dash alone goes home",
+			cmd:     `cd -- && git commit -m x`,
+			wantCwd: "/home/tester",
+		},
+		{
+			name:           "cd with option flag",
+			cmd:            `cd -P /abs && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd dash alone",
+			cmd:            `cd - && git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "equals-joined git-dir with glob",
+			cmd:            `git --git-dir=/g-[a]/.git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd double-dash fused with expansion",
+			cmd:            `cd --$X ; git commit -m x`,
+			wantUnresolved: true,
+		},
+		{
+			name:           "cd quoted double-dash fused with expansion",
+			cmd:            `cd "--$X" ; git commit -m x`,
+			wantUnresolved: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Analyze(tt.cmd, "/repo")
+			if !r.IsGitCommit {
+				t.Fatalf("Analyze(%q) IsGitCommit = false, want true", tt.cmd)
+			}
+			if r.CwdUnresolved != tt.wantUnresolved {
+				t.Errorf("Analyze(%q) CwdUnresolved = %v, want %v", tt.cmd, r.CwdUnresolved, tt.wantUnresolved)
+			}
+			if !tt.wantUnresolved && r.EffectiveCwd != tt.wantCwd {
+				t.Errorf("Analyze(%q) EffectiveCwd = %q, want %q", tt.cmd, r.EffectiveCwd, tt.wantCwd)
+			}
+		})
+	}
+}
+
+// TestAnalyze_RelativeHome checks that a relative HOME leaves bare `cd`
+// unresolved. The shell chdirs to it from its own cwd, while a raw relative
+// EffectiveCwd would be resolved against the hook process's directory — a
+// decoy repository there could supply the authorizing tree hash.
+func TestAnalyze_RelativeHome(t *testing.T) {
+	t.Setenv("HOME", "relative")
+
+	r := Analyze(`cd /tmp; cd && git commit -m x`, "/repo")
+	if !r.IsGitCommit {
+		t.Fatalf("IsGitCommit = false, want true")
+	}
+	if !r.CwdUnresolved {
+		t.Errorf("CwdUnresolved = false, want true (EffectiveCwd=%q would be hashed)", r.EffectiveCwd)
 	}
 }
 

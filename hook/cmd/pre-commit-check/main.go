@@ -131,14 +131,15 @@ func ambiguousCwdMessage() string {
 	var b strings.Builder
 	b.WriteString("review-pipeline hook: a `git commit` uses an ambiguous working directory.\n\n")
 	b.WriteString("The hook cannot determine which directory the commit targets: the\n")
-	b.WriteString("cd / git -C / --git-dir / --work-tree value carries a tilde whose\n")
-	b.WriteString("expansion depends on the executing shell (mixed quoting like ~\"/x\"\n")
-	b.WriteString("diverges between bash and zsh; ~user depends on user lookup), the\n")
-	b.WriteString("command manipulates HOME, or nesting is too deep to analyze. No\n")
-	b.WriteString("marker will be computed or consumed for this command.\n\n")
-	b.WriteString("❌ STOP. Re-issue the command with an explicit path — an absolute path,\n")
-	b.WriteString("or a plain unquoted ~/... without HOME manipulation — then follow the\n")
-	b.WriteString("normal review flow.\n")
+	b.WriteString("cd / git -C / --git-dir / --work-tree value is computed at run time\n")
+	b.WriteString("($VAR, $(...)), or carries a tilde whose expansion depends on the\n")
+	b.WriteString("executing shell (mixed quoting like ~\"/x\"; ~user depends on user\n")
+	b.WriteString("lookup), or the command manipulates HOME, hides the git subcommand\n")
+	b.WriteString("behind an expansion, or nests too deep to analyze. No marker will be\n")
+	b.WriteString("computed or consumed for this command.\n\n")
+	b.WriteString("❌ STOP. Re-issue the command with explicit literal paths — an absolute\n")
+	b.WriteString("path, or a plain unquoted ~/... without HOME manipulation — then follow\n")
+	b.WriteString("the normal review flow.\n")
 	return b.String()
 }
 

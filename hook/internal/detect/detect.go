@@ -24,13 +24,15 @@ type Result struct {
 	// the commit segment, ordered for splicing before a `write-tree` call.
 	GitGlobals []string
 	// CwdUnresolved reports that the commit's directory is unknowable: a
-	// cwd-affecting value (cd target, git -C, --git-dir/--work-tree) uses a
-	// form whose meaning depends on the executing shell (mixed-quoted tilde,
-	// ~user, any tilde once the command manipulates HOME), or nesting
-	// exceeded the analysis depth. The caller must block WITHOUT computing
-	// or consuming any tree hash: a literal fallback is itself a resolution,
-	// and a decoy repo at the literal path could be used to authorize the
-	// wrong tree.
+	// cwd-affecting value (cd target, git -C, --git-dir/--work-tree) carries
+	// text the shell computes at run time (expansions, globs, dollar-quotes)
+	// or a form whose meaning depends on the executing shell (mixed-quoted
+	// tilde, ~user, any tilde once the command manipulates HOME, option-led
+	// cd), shell expansions hide the git subcommand or an option word, or
+	// nesting exceeded the analysis depth. The caller must block WITHOUT
+	// computing or consuming any tree hash: a literal fallback is itself a
+	// resolution, and a decoy repo at the literal path could be used to
+	// authorize the wrong tree.
 	CwdUnresolved bool
 }
 
@@ -149,15 +151,47 @@ func analyze(cmd, baseCwd string, depth int, homeMutated bool) Result {
 		// (Non-shell consumer was already filtered above.)
 		// For non-shell-consumer commands with heredocs, do nothing.
 
-		if head == "cd" && len(args) >= 2 {
-			if tildeUnresolved(call.Args[wordOffset+1]) ||
-				(homeMutated && tildeLed(call.Args[wordOffset+1])) {
+		if head == "cd" {
+			cdArgs := args[1:]
+			cdWords := call.Args[wordOffset+1:]
+			// Only a pure-literal `--` is the option terminator; wordLit
+			// collapses expansions, so a fused `--$X` also reads as "--" and
+			// must keep flowing into the checks below.
+			if len(cdArgs) > 0 && cdArgs[0] == "--" && !wordHasExpansion(cdWords[0]) {
+				cdArgs = cdArgs[1:]
+				cdWords = cdWords[1:]
+			}
+			if len(cdArgs) == 0 {
+				// Bare cd targets HOME. A relative HOME is chdir'd from the
+				// shell's cwd but would be resolved against the hook
+				// process's directory, so only an absolute one resolves.
+				home, err := os.UserHomeDir()
+				if !homeMutated && err == nil && filepath.IsAbs(home) {
+					cwdAmbiguous = false
+					cwd = home
+				} else {
+					cwdAmbiguous = true
+				}
+				continue
+			}
+			// Option-led cd (-P, -L, `cd -` OLDPWD, …) isn't modeled: the
+			// word the analyzer would take as the target is not the target.
+			if strings.HasPrefix(cdArgs[0], "-") {
+				cwdAmbiguous = true
+				continue
+			}
+			target := cdWords[0]
+			// An expansion or glob in the target resolves to different text
+			// here than in the shell — a resolved fallback would hash the
+			// wrong repository (a decoy can sit at the literal name).
+			if tildeUnresolved(target) || wordHasExpansion(target) ||
+				litHasGlob(target) || (homeMutated && tildeLed(target)) {
 				cwdAmbiguous = true
 			} else {
-				if filepath.IsAbs(args[1]) {
+				if filepath.IsAbs(cdArgs[0]) {
 					cwdAmbiguous = false
 				}
-				cwd = resolveCwd(args[1], cwd)
+				cwd = resolveCwd(cdArgs[0], cwd)
 			}
 			continue
 		}
@@ -171,10 +205,11 @@ func analyze(cmd, baseCwd string, depth int, homeMutated bool) Result {
 			continue
 		}
 		// Expansions ($VAR, $(…)) resolve to empty text in wordsToStrings, so
-		// a subcommand hidden behind one is invisible to the checks below.
-		// Like the maxRecursion case, that uncertainty fails closed.
+		// a subcommand hidden behind one is invisible to the checks below —
+		// and the hidden words can carry -C/--git-dir redirections, so the
+		// commit's directory is unknowable, not merely the subcommand.
 		if expansionHidesSubcommand(call.Args, wordOffset, subIdx) {
-			return Result{IsGitCommit: true, EffectiveCwd: cwd, CwdUnresolved: cwdAmbiguous}
+			return Result{IsGitCommit: true, EffectiveCwd: cwd, CwdUnresolved: true}
 		}
 		if subIdx >= len(args) || args[subIdx] != "commit" {
 			continue
@@ -520,18 +555,47 @@ func tildeUnresolved(w *syntax.Word) bool {
 }
 
 // gitValueUnresolved reports whether any cwd-affecting git global value
-// (-C, --git-dir, --work-tree) before the subcommand carries a
-// shell-dependent tilde form. With homeMutated, every tilde-led value is
-// shell-dependent: the analyzer's expansion and the shell's disagree.
+// (-C, --git-dir, --work-tree, and their --opt=value forms) before the
+// subcommand is unknowable at analysis time: a shell-dependent tilde form,
+// any expansion (the shell substitutes real text where the analyzer sees
+// empty), a glob the shell may expand to a different path, or — with
+// homeMutated — any tilde-led value, since the analyzer's expansion and the
+// shell's disagree.
 func gitValueUnresolved(words []*syntax.Word, offset int, args []string, subIdx int, homeMutated bool) bool {
 	for i := 1; i < subIdx && i < len(args); i++ {
 		switch args[i] {
 		case "-C", "--git-dir", "--work-tree":
 			if wi := offset + i + 1; wi < len(words) {
-				if tildeUnresolved(words[wi]) || (homeMutated && tildeLed(words[wi])) {
+				if tildeUnresolved(words[wi]) || wordHasExpansion(words[wi]) ||
+					litHasGlob(words[wi]) || (homeMutated && tildeLed(words[wi])) {
 					return true
 				}
 			}
+		}
+		// Equals-joined forms carry their value inside the option word; an
+		// expansion there splices real path text into the literal the
+		// analyzer records for write-tree replay.
+		if strings.HasPrefix(args[i], "--git-dir=") || strings.HasPrefix(args[i], "--work-tree=") {
+			if wi := offset + i; wi < len(words) &&
+				(wordHasExpansion(words[wi]) || litHasGlob(words[wi])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// litHasGlob reports whether w carries glob or brace metacharacters in its
+// unquoted literal parts — the shell may expand them to a different path
+// than the literal text the analyzer resolves, and a decoy repository can
+// sit at the literal name.
+func litHasGlob(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, p := range w.Parts {
+		if lit, ok := p.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[{") {
+			return true
 		}
 	}
 	return false
@@ -626,17 +690,25 @@ func tildeExpand(lit string, w *syntax.Word) string {
 
 // expansionHidesSubcommand reports whether shell expansions make the git
 // subcommand unknowable: the word at the subcommand position contains any
-// expansion (its value could be "commit"), or an earlier arg carries an
+// expansion (its value could be "commit"), an earlier arg carries an
 // expansion that can yield multiple argv words and shift a hidden commit
-// into subcommand position. Quoted scalar expansions before a literal
-// subcommand are safe — they always remain a single word.
+// into subcommand position, or a dash-led option word is not fully literal —
+// its literal text classified argv structure (which words consume values),
+// so an expansion attached to it (--git-dir"$X") can carry the value at run
+// time and shift where the subcommand lands. Quoted scalar expansions in
+// value positions before a literal subcommand are safe — they always remain
+// a single word that is consumed as a value regardless of content.
 // offset maps stripped-arg positions back into words (see stripTransparent).
 func expansionHidesSubcommand(words []*syntax.Word, offset, subIdx int) bool {
 	if i := offset + subIdx; i < len(words) && wordHasExpansion(words[i]) {
 		return true
 	}
 	for i := 1; i < subIdx && offset+i < len(words); i++ {
-		if wordHasSplittingExpansion(words[offset+i]) {
+		w := words[offset+i]
+		if wordHasSplittingExpansion(w) {
+			return true
+		}
+		if strings.HasPrefix(wordLit(w), "-") && wordHasExpansion(w) {
 			return true
 		}
 	}
@@ -678,15 +750,25 @@ func wordHasSplittingExpansion(w *syntax.Word) bool {
 }
 
 // wordHasExpansion reports whether w contains any part that wordLit cannot
-// resolve to literal text (ParamExp, CmdSubst, ArithmExp, etc.).
+// resolve to literal text: ParamExp, CmdSubst, ArithmExp, etc., and the
+// dollar-quote forms — $'…' evaluates escape sequences and $"…" is
+// locale-translated, so the shell's text differs from the raw value the
+// analyzer sees.
 func wordHasExpansion(w *syntax.Word) bool {
 	if w == nil {
 		return false
 	}
 	for _, p := range w.Parts {
 		switch x := p.(type) {
-		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.Lit:
+		case *syntax.SglQuoted:
+			if x.Dollar {
+				return true
+			}
 		case *syntax.DblQuoted:
+			if x.Dollar {
+				return true
+			}
 			for _, pp := range x.Parts {
 				if _, ok := pp.(*syntax.Lit); !ok {
 					return true
